@@ -28,10 +28,11 @@ import typer
 # Providers: each agent CLI we know how to drive.
 # --------------------------------------------------------------------------- #
 
-# A command builder turns (prompt, model, output_file) into an argv list.
+# A command builder turns (prompt, model, output_file, perm) into an argv list.
 # output_file is a path the CLI may be told to write its final answer to; it is
-# None for providers that answer cleanly on stdout. Only codex uses it.
-CommandBuilder = Callable[[str, str, str | None], list[str]]
+# None for providers that answer cleanly on stdout. Only codex uses it. `perm`
+# is the permission argv (read-only or yolo flags) spliced in before the prompt.
+CommandBuilder = Callable[[str, str, str | None, tuple[str, ...]], list[str]]
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,12 @@ class Provider:
     executable: str
     default_model: str
     build: CommandBuilder
+    # Permission flags, declared as data rather than branched per tool. `readonly`
+    # is spliced in for the safe default (no write access); `None` means the tool
+    # has NO read-only mode and is excluded from the default panel. `yolo` is
+    # spliced in under --yolo to grant full write access.
+    readonly: tuple[str, ...] | None = ()
+    yolo: tuple[str, ...] = ()
     # Env keys to drop before spawning. claude refuses to run nested inside
     # Claude Code unless CLAUDECODE is cleared, so moa can call it from an agent.
     unset_env: tuple[str, ...] = ()
@@ -54,30 +61,38 @@ class Provider:
             env.pop(key, None)
         return env
 
+    def perm_args(self, yolo: bool) -> tuple[str, ...]:
+        """The permission argv for this run: yolo flags under --yolo, else readonly."""
+        if yolo:
+            return self.yolo
+        # readonly is None only for tools with no read-only mode; those are
+        # filtered out of the default panel before we ever build a command.
+        return self.readonly or ()
 
-def _claude(prompt: str, model: str, _out: str | None) -> list[str]:
-    return ["claude", "--model", model, "-p", prompt]
+
+def _claude(prompt: str, model: str, _out: str | None, perm: tuple[str, ...]) -> list[str]:
+    return ["claude", "--model", model, *perm, "-p", prompt]
 
 
-def _codex(prompt: str, model: str, out: str | None) -> list[str]:
-    cmd = ["codex", "exec", "-m", model, "--skip-git-repo-check", "--color", "never"]
+def _codex(prompt: str, model: str, out: str | None, perm: tuple[str, ...]) -> list[str]:
+    cmd = ["codex", "exec", "-m", model, "--skip-git-repo-check", "--color", "never", *perm]
     if out:
         cmd += ["-o", out]
     cmd.append(prompt)
     return cmd
 
 
-def _agy(prompt: str, model: str, _out: str | None) -> list[str]:
+def _agy(prompt: str, model: str, _out: str | None, perm: tuple[str, ...]) -> list[str]:
     # agy also hosts Claude/GPT-OSS models, so we pin a Gemini model explicitly
     # to keep the panel diverse. Without --model it defaults to Gemini Flash.
-    return ["agy", "--model", model, "-p", prompt]
+    return ["agy", "--model", model, *perm, "-p", prompt]
 
 
-def _opencode(prompt: str, model: str, _out: str | None) -> list[str]:
+def _opencode(prompt: str, model: str, _out: str | None, perm: tuple[str, ...]) -> list[str]:
     # opencode has no universal default model (it depends on which provider the
     # user has authed), so we omit -m when no model is given and let opencode
     # pick its own default. The prompt is a positional arg.
-    cmd = ["opencode", "run"]
+    cmd = ["opencode", "run", *perm]
     if model:
         cmd += ["-m", model]
     cmd.append(prompt)
@@ -85,10 +100,28 @@ def _opencode(prompt: str, model: str, _out: str | None) -> list[str]:
 
 
 PROVIDERS: dict[str, Provider] = {
-    "claude": Provider("claude", "claude", "opus", _claude, unset_env=("CLAUDECODE",)),
-    "codex": Provider("codex", "codex", "gpt-5.5", _codex, uses_output_file=True),
-    "agy": Provider("agy", "agy", "Gemini 3.1 Pro (High)", _agy),
-    "opencode": Provider("opencode", "opencode", "", _opencode),
+    "claude": Provider(
+        "claude", "claude", "opus", _claude,
+        readonly=("--permission-mode", "plan"),
+        yolo=("--permission-mode", "bypassPermissions"),
+        unset_env=("CLAUDECODE",),
+    ),
+    "codex": Provider(
+        "codex", "codex", "gpt-5.5", _codex,
+        readonly=("-s", "read-only"),
+        yolo=("-s", "danger-full-access"),
+        uses_output_file=True,
+    ),
+    "agy": Provider(
+        "agy", "agy", "Gemini 3.1 Pro (High)", _agy,
+        readonly=None,  # no read-only mode exists -> excluded from default panel
+        yolo=(),
+    ),
+    "opencode": Provider(
+        "opencode", "opencode", "", _opencode,
+        readonly=("--agent", "plan"),
+        yolo=(),  # default = build agent (full access)
+    ),
 }
 
 # Auto-selection order, roughly by popularity. -n/--num walks this list and
@@ -108,26 +141,48 @@ def missing_provider_names() -> list[str]:
     return [name for name in PRIORITY if not _installed(name)]
 
 
+def _has_readonly(name: str) -> bool:
+    return PROVIDERS[name].readonly is not None
+
+
 def select_for_run(
-    num: int, names: tuple[str, ...] | None, exclude: tuple[str, ...] = ()
-) -> tuple[list[Provider], list[str]]:
-    """Pick providers to run, returning (to_run, skipped_because_not_installed).
+    num: int, names: tuple[str, ...] | None, exclude: tuple[str, ...] = (), yolo: bool = False
+) -> tuple[list[Provider], list[str], list[str]]:
+    """Pick providers to run.
+
+    Returns (to_run, skipped_not_installed, dropped_no_readonly).
 
     With an explicit `names` list we honour it in order, skipping any not
     installed. Otherwise we take the first `num` installed providers from
     PRIORITY. Excluded providers are dropped before either path takes effect, so
     `-n` counts only non-excluded installs and `-p` pins drop excluded names too.
+
+    Safety: unless `yolo`, providers with no read-only mode (`readonly is None`)
+    are dropped from the default panel and from `-n`. Pinning such a provider via
+    `-p` without `--yolo` is an error - the caller must opt into write access.
     """
     unknown = [name for name in (*(names or ()), *exclude) if name not in PROVIDERS]
     if unknown:
         raise ValueError(f"Unknown provider(s): {', '.join(unknown)}")
     excluded = set(exclude)
     if names:
-        chosen = [PROVIDERS[name] for name in names if name not in excluded and _installed(name)]
-        skipped = [name for name in names if name not in excluded and not _installed(name)]
-        return chosen, skipped
+        kept = [name for name in names if name not in excluded]
+        if not yolo:
+            pinned_no_ro = [name for name in kept if not _has_readonly(name)]
+            if pinned_no_ro:
+                joined = ", ".join(pinned_no_ro)
+                raise ValueError(
+                    f"{joined} has no read-only mode; rerun with --yolo to allow it (grants write access)"
+                )
+        chosen = [PROVIDERS[name] for name in kept if _installed(name)]
+        skipped = [name for name in kept if not _installed(name)]
+        return chosen, skipped, []
     available = [name for name in available_provider_names() if name not in excluded]
-    return [PROVIDERS[name] for name in available[:num]], []
+    dropped: list[str] = []
+    if not yolo:
+        dropped = [name for name in available if not _has_readonly(name)]
+        available = [name for name in available if _has_readonly(name)]
+    return [PROVIDERS[name] for name in available[:num]], [], dropped
 
 
 # --------------------------------------------------------------------------- #
@@ -176,7 +231,9 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
     await process.wait()
 
 
-async def run_provider(provider: Provider, prompt: str, timeout: float, model: str | None = None) -> RunResult:
+async def run_provider(
+    provider: Provider, prompt: str, timeout: float, model: str | None = None, yolo: bool = False
+) -> RunResult:
     model = model or provider.default_model
     out_file: str | None = None
     if provider.uses_output_file:
@@ -187,7 +244,7 @@ async def run_provider(provider: Provider, prompt: str, timeout: float, model: s
     try:
         try:
             process = await asyncio.create_subprocess_exec(
-                *provider.build(prompt, model, out_file),
+                *provider.build(prompt, model, out_file, provider.perm_args(yolo)),
                 # DEVNULL is essential: codex and agy block forever on an
                 # inherited TTY stdin, burning the entire timeout otherwise.
                 stdin=asyncio.subprocess.DEVNULL,
@@ -224,12 +281,17 @@ async def run_provider(provider: Provider, prompt: str, timeout: float, model: s
 
 
 async def stream(
-    providers: list[Provider], prompt: str, timeout: float, models: dict[str, str] | None = None
+    providers: list[Provider],
+    prompt: str,
+    timeout: float,
+    models: dict[str, str] | None = None,
+    yolo: bool = False,
 ) -> AsyncIterator[RunResult]:
     """Run every provider in parallel, yielding each result as it finishes."""
     models = models or {}
     tasks = [
-        asyncio.create_task(run_provider(p, prompt, timeout, models.get(p.name))) for p in providers
+        asyncio.create_task(run_provider(p, prompt, timeout, models.get(p.name), yolo))
+        for p in providers
     ]
     for completed in asyncio.as_completed(tasks):
         yield await completed
@@ -421,9 +483,10 @@ async def _collect(
     timeout: float,
     json_output: bool,
     models: dict[str, str] | None = None,
+    yolo: bool = False,
 ) -> list[RunResult]:
     results: list[RunResult] = []
-    async for result in stream(providers, prompt, timeout, models):
+    async for result in stream(providers, prompt, timeout, models, yolo):
         results.append(result)
         _emit(json.dumps(result_record(result)) if json_output else render_block(result))
     return results
@@ -453,6 +516,10 @@ def ask(
         typer.Option("--synthesizer", help="Who synthesizes: auto | random | a provider name."),
     ] = "auto",
     json_output: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSONL.")] = False,
+    yolo: Annotated[
+        bool,
+        typer.Option("--yolo", help="Grant agents full write access (default is read-only)."),
+    ] = False,
 ) -> None:
     """Ask multiple agents in parallel; answers stream back as each one finishes."""
     prompt_text = _read_prompt(prompt, file)
@@ -464,8 +531,8 @@ def ask(
     models = parse_model_overrides(model)
 
     try:
-        selected, skipped = select_for_run(
-            num, tuple(provider) if provider else None, tuple(exclude) if exclude else ()
+        selected, skipped, dropped = select_for_run(
+            num, tuple(provider) if provider else None, tuple(exclude) if exclude else (), yolo
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -474,18 +541,21 @@ def ask(
         _note("No agents available. Run `moa doctor` to see which CLIs are installed.")
         raise typer.Exit(code=1)
 
-    note = f"Asking {', '.join(p.name for p in selected)} (timeout {timeout:g}s)"
+    mode = "yolo (full write access)" if yolo else "read-only"
+    note = f"Asking {', '.join(p.name for p in selected)} (timeout {timeout:g}s, {mode})"
     if skipped:
         note += f"; skipped (not installed): {', '.join(skipped)}"
     if exclude:
         note += f"; excluded: {', '.join(exclude)}"
+    if dropped:
+        note += f"; dropped (no read-only mode, use --yolo): {', '.join(dropped)}"
     _note(note)
 
-    results = asyncio.run(_collect(selected, prompt_text, timeout, json_output, models))
+    results = asyncio.run(_collect(selected, prompt_text, timeout, json_output, models, yolo))
     successes = [r for r in results if r.status == "ok"]
 
     if synth:
-        _run_synthesis(prompt_text, results, successes, selected, synthesizer, timeout, json_output, models)
+        _run_synthesis(prompt_text, results, successes, selected, synthesizer, timeout, json_output, models, yolo)
 
     if not successes:
         raise typer.Exit(code=1)
@@ -500,6 +570,7 @@ def _run_synthesis(
     timeout: float,
     json_output: bool,
     models: dict[str, str] | None = None,
+    yolo: bool = False,
 ) -> None:
     if len(successes) < 2:
         _note("Synthesis skipped: need at least 2 successful responses.")
@@ -518,7 +589,7 @@ def _run_synthesis(
     synth_prompt, _label_map = build_synthesis_prompt(prompt_text, results, blind=True)
     _note(f"Synthesizing with {synth_name}...")
     synth_model = (models or {}).get(synth_name)
-    synth_result = asyncio.run(run_provider(PROVIDERS[synth_name], synth_prompt, timeout, synth_model))
+    synth_result = asyncio.run(run_provider(PROVIDERS[synth_name], synth_prompt, timeout, synth_model, yolo))
 
     if json_output:
         _emit(json.dumps(synthesis_record(synth_result, synth_name)))
@@ -528,12 +599,20 @@ def _run_synthesis(
 
 @app.command()
 def doctor() -> None:
-    """Show which agent CLIs are installed."""
+    """Show which agent CLIs are installed and their default models."""
     available = available_provider_names()
     missing = missing_provider_names()
 
     def fmt(names: list[str]) -> str:
-        return ", ".join(f"{name} ({PROVIDERS[name].executable})" for name in names) or "none"
+        parts: list[str] = []
+        for name in names:
+            provider = PROVIDERS[name]
+            model = provider.default_model or "configured default"
+            label = f"{name} ({model})"
+            if provider.readonly is None:
+                label += " [no read-only - default-excluded]"
+            parts.append(label)
+        return ", ".join(parts) or "none"
 
     typer.echo("Available agents: " + fmt(available))
     typer.echo("Missing agents:   " + fmt(missing))

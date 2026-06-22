@@ -32,16 +32,51 @@ A single model gives you one perspective. Asking three frontier models the same 
 ## Usage
 
 ```bash
-moa doctor                                  # show which agent CLIs are installed
-moa ask "Should this feature use SQLite?"   # ask the top 3 installed agents
+moa doctor                                  # show installed CLIs and their default models
+moa ask "Should this feature use SQLite?"   # ask the top 3 installed agents (read-only)
 moa ask -n 2 "..."                          # ask only the top 2 (priority order)
 moa ask -p claude -p agy "..."              # pin specific agents
 moa ask -x claude "..."                     # drop an agent (e.g. exclude the caller's own model)
 moa ask -m claude=sonnet "..."              # override which model a tool uses
+moa ask --yolo "..."                        # grant full write access (default is read-only)
 moa ask --synth "..."                       # also merge the answers into one
 moa ask --json "..."                        # machine-readable JSONL (for agents/pipes)
 git diff | moa ask -f - "Review this diff." # read the prompt from stdin
 ```
+
+### Read-only by default
+
+MOA is built to be called autonomously, so by default **no agent can write files or
+run mutating commands**. Each agent runs in its tool's safest mode: it may read local
+files (and, where the tool allows, research online), but it cannot edit anything. This
+is enforced by spawning each CLI with its own read-only flags:
+
+| Provider   | Read-only (default)      | Reads files | Web research              |
+| ---------- | ------------------------ | ----------- | ------------------------- |
+| `claude`   | `--permission-mode plan` | yes         | yes                       |
+| `codex`    | `-s read-only`           | yes         | **no** (sandbox blocks network) |
+| `opencode` | `--agent plan`           | yes         | yes                       |
+| `agy`      | none exists              | -           | -                         |
+
+`codex`'s read-only mode is a kernel sandbox that also blocks network, so codex does no
+web research in the default mode (it still reads local files). `agy` has **no read-only
+mode** that stops its file-writing tools, so it is **excluded from the default panel** and
+only runs under `--yolo`. The selection note on stderr tells you when an agent was dropped
+for this reason.
+
+### `--yolo` (full write access)
+
+Pass `--yolo` to grant every agent full write access (file edits and shell commands,
+auto-approved). Use it only when you actually want the agents to change your working tree.
+
+```bash
+moa ask --yolo "Refactor this module and run the tests."
+moa ask -p agy --yolo "..."   # the only way to run agy (it has no read-only mode)
+```
+
+Under `--yolo`, `agy` becomes eligible again in both `-n` selection and `-p` pinning.
+Pinning `agy` with `-p agy` **without** `--yolo` is an error: MOA refuses to silently run
+a tool it can't sandbox.
 
 ### How agents are selected
 
@@ -51,7 +86,7 @@ git diff | moa ask -f - "Review this diff." # read the prompt from stdin
 claude  ->  codex  ->  agy  ->  opencode
 ```
 
-So `moa ask -n 3` on a machine with all four installed asks Claude, Codex, and agy. Use `-p/--provider` (repeatable) to pin an exact set and ignore `-n`.
+Because the default is read-only and `agy` has no read-only mode, `agy` is skipped in the default panel. So `moa ask -n 3` on a machine with all four installed asks Claude, Codex, and opencode (agy is dropped with a note on stderr). Add `--yolo` to bring agy back. Use `-p/--provider` (repeatable) to pin an exact set and ignore `-n`.
 
 Use `-x/--exclude` (repeatable) to drop one or more agents from the run. Exclusion is applied *before* `-n` takes the first N, and it also drops excluded names from an explicit `-p` set. It is off by default. The motivating case: an agent (e.g. Claude Code) calls `moa` for *other* opinions; `moa ask -x claude` makes sure one "peer" isn't just the caller's own model. So `moa ask -n 3 -x claude` asks Codex, agy, and opencode.
 
@@ -96,12 +131,14 @@ The synthesizer is a different story. To stop it picking favourites by brand, it
 
 ## Supported agents
 
-| Provider    | CLI        | Invocation                                          |
-| ----------- | ---------- | --------------------------------------------------- |
-| `claude`    | `claude`   | `claude --model opus -p PROMPT`                     |
-| `codex`     | `codex`    | `codex exec -m gpt-5.5 --skip-git-repo-check PROMPT`|
-| `agy`       | `agy`      | `agy --model "Gemini 3.1 Pro (High)" -p PROMPT`     |
-| `opencode`  | `opencode` | `opencode run PROMPT`                               |
+Invocations below show the default (read-only) flags; `--yolo` swaps in each tool's full-access mode.
+
+| Provider    | CLI        | Invocation (read-only default)                                      |
+| ----------- | ---------- | ------------------------------------------------------------------- |
+| `claude`    | `claude`   | `claude --model opus --permission-mode plan -p PROMPT`              |
+| `codex`     | `codex`    | `codex exec -m gpt-5.5 --skip-git-repo-check -s read-only PROMPT`   |
+| `agy`       | `agy`      | `agy --model "Gemini 3.1 Pro (High)" -p PROMPT` (`--yolo` only)     |
+| `opencode`  | `opencode` | `opencode run --agent plan PROMPT`                                  |
 
 Adding a new agent is a single entry in the `PROVIDERS` table in `src/moa_cli/cli.py` (executable, default model, command builder); it then participates in detection, `-n` selection, and synthesis automatically.
 
