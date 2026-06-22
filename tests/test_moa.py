@@ -10,15 +10,22 @@ from moa_cli.cli import (
     Provider,
     RunResult,
     assign_debate_roles,
+    build_debate_turn_prompt,
+    build_judge_prompt,
     build_synthesis_prompt,
     choose_synthesizer,
     clamp_rounds,
+    load_config,
     parse_model_overrides,
     render_block,
     render_synthesis_block,
     result_record,
     run_provider,
     select_for_run,
+    serialize_config,
+)
+from moa_cli.cli import (
+    _signals_convergence as signals_convergence,
 )
 
 
@@ -847,3 +854,337 @@ def test_debate_converges_early(monkeypatch) -> None:
     assert "converged" in result.stderr
     # 2 rounds x 2 debaters + 1 judge = 5 calls (round 3 never runs).
     assert round_state["n"] == 5
+
+
+# --- debate: judge prompt is anonymized + shuffled (judge-blindness) --------
+
+
+def test_build_judge_prompt_anonymizes_transcript() -> None:
+    # The judge must never see provider/model attribution: the structure relabels
+    # each turn "Participant N" with no provider/model name attached, so a brand
+    # can't leak via the labels (guards judge-blindness from regression). Answer
+    # bodies are neutral here so the only place a name could appear is a label.
+    transcript = [
+        RunResult("claude", "opus", "ok", "The answer is four.", "", 1.0, 0),
+        RunResult("codex", "gpt-5.5", "ok", "Four, after carrying the one.", "", 1.0, 0),
+    ]
+    prompt, label_map = build_judge_prompt("Q?", transcript, rng=random.Random(0))
+    for brand in ("claude", "codex", "opus", "gpt-5.5"):
+        assert brand not in prompt
+    assert "Participant 1" in prompt and "Participant 2" in prompt
+    # The label_map still maps the (anonymized) labels back to real providers.
+    assert set(label_map.values()) == {"claude", "codex"}
+    assert set(label_map) == {"Participant 1", "Participant 2"}
+
+
+def test_build_judge_prompt_shuffles_with_seeded_rng() -> None:
+    # Order is shuffled (a seeded RNG makes this deterministic to assert). With
+    # this seed the two participants come out in reversed provider order.
+    transcript = [
+        RunResult("claude", "opus", "ok", "alpha", "", 1.0, 0),
+        RunResult("codex", "gpt-5.5", "ok", "beta", "", 1.0, 0),
+    ]
+    _, label_map = build_judge_prompt("Q?", transcript, rng=random.Random(1))
+    # Seed 1 reverses the pair, so Participant 1 is the second provider (codex).
+    assert label_map["Participant 1"] == "codex"
+    assert label_map["Participant 2"] == "claude"
+
+
+def test_build_judge_prompt_ignores_failed_turns() -> None:
+    # A failed/errored turn never reaches the judge transcript.
+    transcript = [
+        RunResult("claude", "opus", "ok", "good answer", "", 1.0, 0),
+        RunResult("codex", "gpt-5.5", "timeout", "", "boom", 1.0, None),
+    ]
+    prompt, label_map = build_judge_prompt("Q?", transcript, rng=random.Random(0))
+    assert list(label_map) == ["Participant 1"]
+    assert label_map == {"Participant 1": "claude"}
+    assert "boom" not in prompt
+
+
+# --- debate: turn prompt (cold round-1 vs adversarial later turns) ----------
+
+
+def test_build_debate_turn_prompt_round1_first_turn_is_cold() -> None:
+    # Round 1, first debater: no prior answers, so no adversarial instruction.
+    prompt = build_debate_turn_prompt("What is 2+2?", prior=[])
+    assert "What is 2+2?" in prompt
+    assert cli.ADVERSARIAL_INSTRUCTION not in prompt
+    assert "other participant" not in prompt
+
+
+def test_build_debate_turn_prompt_later_turn_is_adversarial() -> None:
+    # A later turn sees the prior answer AND the adversarial-stance instruction.
+    prior = [("the other participant", "Their prior answer is 5.")]
+    prompt = build_debate_turn_prompt("What is 2+2?", prior=prior)
+    assert "Their prior answer is 5." in prompt
+    assert cli.ADVERSARIAL_INSTRUCTION in prompt
+    assert "the other participant" in prompt
+
+
+# --- debate: convergence signal (round >= 2 only, never on failed turns) -----
+
+
+def test_signals_convergence_marker_detected() -> None:
+    # An OK turn opening with the marker (case-insensitive) signals convergence.
+    assert signals_convergence(_ok("claude", "NO SUBSTANTIVE CHANGE, I agree."))
+    assert signals_convergence(_ok("claude", "no substantive change - same as before"))
+
+
+def test_signals_convergence_ignores_failed_turn() -> None:
+    # A failed/errored turn never counts as convergence even if its text matches.
+    failed = RunResult("claude", "opus", "timeout", "NO SUBSTANTIVE CHANGE", "boom", 1.0, None)
+    assert not signals_convergence(failed)
+    assert not signals_convergence(_ok("claude", "Here is a brand new argument."))
+
+
+def test_debate_round1_marker_does_not_stop_debate(monkeypatch) -> None:
+    # A round-1 convergence marker must NOT end the debate: early-stop is only
+    # meaningful from round 2 onward (round 1 always has a cold answer).
+    _install_all(monkeypatch)
+    round_state = {"n": 0}
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        round_state["n"] += 1
+        # Every debater turn opens with the marker, including round 1.
+        return _ok(provider.name, "NO SUBSTANTIVE CHANGE I have nothing to add.")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "-r", "2", "hi"]
+    )
+    assert result.exit_code == 0
+    # Round 1 markers are ignored; round 2 markers then converge and stop after 2
+    # rounds. 2 debaters x 2 rounds + 1 judge = 5 calls (round 1 did NOT stop it).
+    assert round_state["n"] == 5
+    # The debate only reports convergence at round 2, never round 1.
+    assert "converged after round 2" in result.stderr
+
+
+# --- config: location, precedence, set/unset round-trip ---------------------
+
+
+def _config_env(monkeypatch, tmp_path):
+    """Point the whole config layer at a temp dir via $MOA_CONFIG_DIR."""
+    monkeypatch.setenv("MOA_CONFIG_DIR", str(tmp_path))
+    return tmp_path / "config.toml"
+
+
+def test_config_dir_honors_env(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MOA_CONFIG_DIR", str(tmp_path))
+    assert cli.config_dir() == tmp_path
+    assert cli.config_path() == tmp_path / "config.toml"
+
+
+def test_config_absent_is_empty(monkeypatch, tmp_path) -> None:
+    # No file == empty config == today's built-in behaviour.
+    _config_env(monkeypatch, tmp_path)
+    assert load_config() == {}
+
+
+def test_config_set_creates_dir_and_file(monkeypatch, tmp_path) -> None:
+    # `set` creates the dir/file on first write.
+    nested = tmp_path / "fresh"
+    monkeypatch.setenv("MOA_CONFIG_DIR", str(nested))
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["config", "set", "num", "2"])
+    assert result.exit_code == 0
+    assert (nested / "config.toml").exists()
+    assert load_config() == {"num": 2}
+
+
+def test_config_set_scalars_and_roundtrip(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(cli.app, ["config", "set", "num", "2"]).exit_code == 0
+    assert runner.invoke(cli.app, ["config", "set", "timeout", "120"]).exit_code == 0
+    assert runner.invoke(cli.app, ["config", "set", "synthesizer", "codex"]).exit_code == 0
+    config = load_config()
+    assert config == {"num": 2, "timeout": 120.0, "synthesizer": "codex"}
+
+
+def test_config_set_exclude_comma_separated(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["config", "set", "exclude", "claude,codex"])
+    assert result.exit_code == 0
+    assert load_config()["exclude"] == ["claude", "codex"]
+
+
+def test_config_set_model_table(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(cli.app, ["config", "set", "model", "claude=sonnet"]).exit_code == 0
+    assert runner.invoke(cli.app, ["config", "set", "model", "agy=Gemini 3.1 Pro (Low)"]).exit_code == 0
+    assert load_config()["models"] == {"claude": "sonnet", "agy": "Gemini 3.1 Pro (Low)"}
+
+
+def test_config_set_rejects_unknown_key(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["config", "set", "nope", "1"])
+    assert result.exit_code != 0
+
+
+def test_config_set_rejects_bad_provider(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(cli.app, ["config", "set", "model", "nope=x"]).exit_code != 0
+    assert runner.invoke(cli.app, ["config", "set", "exclude", "nope"]).exit_code != 0
+
+
+def test_config_set_rejects_bad_scalar(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(cli.app, ["config", "set", "num", "0"]).exit_code != 0
+    assert runner.invoke(cli.app, ["config", "set", "num", "abc"]).exit_code != 0
+    assert runner.invoke(cli.app, ["config", "set", "synthesizer", "nope"]).exit_code != 0
+
+
+def test_config_unset_scalar(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    runner.invoke(cli.app, ["config", "set", "num", "2"])
+    assert runner.invoke(cli.app, ["config", "unset", "num"]).exit_code == 0
+    assert "num" not in load_config()
+
+
+def test_config_unset_single_model(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    runner.invoke(cli.app, ["config", "set", "model", "claude=sonnet"])
+    runner.invoke(cli.app, ["config", "set", "model", "codex=gpt-5.5"])
+    assert runner.invoke(cli.app, ["config", "unset", "model", "claude"]).exit_code == 0
+    assert load_config()["models"] == {"codex": "gpt-5.5"}
+
+
+def test_config_show_includes_defaults_and_path(monkeypatch, tmp_path) -> None:
+    cfg_file = _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    runner.invoke(cli.app, ["config", "set", "num", "2"])
+    result = runner.invoke(cli.app, ["config", "show"])
+    assert result.exit_code == 0
+    assert str(cfg_file) in result.stdout
+    assert "num = 2" in result.stdout
+    # Defaults for unset keys still show.
+    assert "timeout = 180" in result.stdout
+    assert 'synthesizer = "auto"' in result.stdout
+
+
+def test_config_path_prints_file(monkeypatch, tmp_path) -> None:
+    cfg_file = _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["config", "path"])
+    assert result.exit_code == 0
+    assert str(cfg_file) in result.stdout
+
+
+def test_load_config_rejects_unknown_key(monkeypatch, tmp_path) -> None:
+    cfg_file = _config_env(monkeypatch, tmp_path)
+    cfg_file.parent.mkdir(parents=True, exist_ok=True)
+    cfg_file.write_text("bogus = 1\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_config()
+
+
+def test_serialize_config_roundtrips_via_load(monkeypatch, tmp_path) -> None:
+    # The hand-rolled serializer's output must reload identically through tomllib.
+    cfg_file = _config_env(monkeypatch, tmp_path)
+    original = {
+        "num": 2,
+        "timeout": 90.5,
+        "synthesizer": "codex",
+        "exclude": ["claude"],
+        "models": {"claude": "sonnet", "agy": 'has "quotes" and a\ttab'},
+    }
+    cfg_file.parent.mkdir(parents=True, exist_ok=True)
+    cfg_file.write_text(serialize_config(original), encoding="utf-8")
+    assert load_config() == original
+
+
+# --- config: precedence through resolve_run (flag > config > default) -------
+
+
+def test_config_default_used_when_flag_omitted(monkeypatch, tmp_path) -> None:
+    # config num=2 is honoured by `ask` when -n is omitted (the verb picks the
+    # config default through resolve_run, like every verb).
+    _install_all(monkeypatch)
+    _config_env(monkeypatch, tmp_path)
+    (tmp_path / "config.toml").write_text("num = 2\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["ask", "hi"])
+    assert result.exit_code == 0
+    # num=2 from config -> top 2 installed (claude, codex), not the built-in 3.
+    assert "Asking claude, codex (" in result.stderr
+
+
+def test_flag_overrides_config(monkeypatch, tmp_path) -> None:
+    # An explicit -n always wins over the config num.
+    _install_all(monkeypatch)
+    _config_env(monkeypatch, tmp_path)
+    (tmp_path / "config.toml").write_text("num = 2\n", encoding="utf-8")
+    monkeypatch.setattr(
+        cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B"), _ok("agy", "C"))
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["ask", "-n", "3", "hi"])
+    assert result.exit_code == 0
+    # -n 3 overrides config num=2.
+    assert "Asking claude, codex, agy (" in result.stderr
+
+
+def test_config_exclude_default_applied(monkeypatch, tmp_path) -> None:
+    # config exclude is honoured when -x is omitted.
+    _install_all(monkeypatch)
+    _config_env(monkeypatch, tmp_path)
+    (tmp_path / "config.toml").write_text('exclude = ["claude"]\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("codex", "A")))
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["ask", "-n", "1", "hi"])
+    assert result.exit_code == 0
+    # claude excluded by config -> top installed becomes codex.
+    assert "Asking codex (" in result.stderr
+    assert "excluded: claude" in result.stderr
+
+
+def test_config_models_reach_run(monkeypatch, tmp_path) -> None:
+    # config [models] supplies a default model, and a CLI -m override wins.
+    _install_all(monkeypatch)
+    _config_env(monkeypatch, tmp_path)
+    (tmp_path / "config.toml").write_text(
+        '[models]\nclaude = "sonnet"\n', encoding="utf-8"
+    )
+    captured: dict = {}
+
+    async def fake_stream(providers, prompt, timeout, models=None, yolo=False):
+        captured["models"] = models
+        yield _ok("claude", "A")
+
+    monkeypatch.setattr(cli, "stream", fake_stream)
+    runner = CliRunner()
+    # No -m: config model is used.
+    assert runner.invoke(cli.app, ["ask", "-p", "claude", "hi"]).exit_code == 0
+    assert captured["models"] == {"claude": "sonnet"}
+    # -m overrides the config model for that provider.
+    assert runner.invoke(cli.app, ["ask", "-p", "claude", "-m", "claude=opus", "hi"]).exit_code == 0
+    assert captured["models"]["claude"] == "opus"
+
+
+def test_config_synthesizer_default_in_distill(monkeypatch, tmp_path) -> None:
+    # distill's verb-specific -s/--synthesizer merges from config when omitted.
+    _install_all(monkeypatch)
+    _config_env(monkeypatch, tmp_path)
+    (tmp_path / "config.toml").write_text('synthesizer = "codex"\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        return _ok(provider.name, "merged")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["distill", "-p", "claude", "-p", "codex", "hi"])
+    assert result.exit_code == 0
+    # synthesizer=codex from config -> codex distills (not the auto default claude).
+    assert "## synthesis · via codex" in result.stdout

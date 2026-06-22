@@ -17,7 +17,8 @@ import signal
 import sys
 import tempfile
 import time
-from collections.abc import AsyncIterator, Callable
+import tomllib
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
@@ -618,6 +619,179 @@ def judge_record(result: RunResult, judge: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Config: persisted user defaults at ~/.moa/config.toml.
+#
+# Precedence is built-in default < config file < CLI flag: a flag always wins,
+# the file only changes a default when the flag is omitted, and an absent file
+# means today's built-in behaviour. We read with stdlib tomllib (no dep) and
+# write with a tiny serializer for this flat schema (scalars, a string list,
+# and a [models] string table), so there is no TOML-writer dependency. The
+# merge happens once, in resolve_run, so all verbs pick up defaults identically.
+# --------------------------------------------------------------------------- #
+
+# Scalar config keys and the type each maps to. `exclude` (list[str]) and the
+# `[models]` table are handled separately because they aren't plain scalars.
+_CONFIG_SCALARS: dict[str, type] = {"num": int, "timeout": float, "synthesizer": str}
+_CONFIG_KEYS: tuple[str, ...] = (*_CONFIG_SCALARS, "exclude", "models")
+# Synthesizer accepts the special modes plus any known provider name.
+_SYNTHESIZER_MODES: tuple[str, ...] = ("auto", "first", "random")
+# The built-in defaults, shown by `config show` when a key isn't in the file.
+_CONFIG_DEFAULTS: dict = {"num": 3, "timeout": 180.0, "synthesizer": "auto", "exclude": [], "models": {}}
+
+
+def config_dir() -> Path:
+    """Directory holding the config file: $MOA_CONFIG_DIR if set, else ~/.moa.
+
+    Honouring the env var is what lets tests point the whole config layer at a
+    temp dir so the real ~/.moa is never read or written.
+    """
+    override = os.environ.get("MOA_CONFIG_DIR")
+    return Path(override) if override else Path.home() / ".moa"
+
+
+def config_path() -> Path:
+    return config_dir() / "config.toml"
+
+
+def _validate_providers(names: Iterable[str], where: str) -> None:
+    unknown = [n for n in names if n not in PROVIDERS]
+    if unknown:
+        raise ValueError(f"Unknown provider(s) in {where}: {', '.join(unknown)}. Known: {', '.join(PROVIDERS)}.")
+
+
+def _validate_scalar(key: str, value) -> None:
+    """Range/value checks shared by load (hand-edited file) and `config set`."""
+    if key == "num" and value < 1:
+        raise ValueError("num must be at least 1.")
+    if key == "timeout" and value <= 0:
+        raise ValueError("timeout must be greater than 0.")
+    if key == "synthesizer" and value not in (*_SYNTHESIZER_MODES, *PROVIDERS):
+        allowed = ", ".join((*_SYNTHESIZER_MODES, *PROVIDERS))
+        raise ValueError(f"synthesizer must be one of: {allowed}.")
+
+
+def load_config() -> dict:
+    """Read and validate the config file. Missing file == empty config.
+
+    Returns a dict with only the keys actually present; values are validated
+    and coerced (num->int, timeout->float). Unknown top-level keys and bad
+    provider names raise ValueError so callers can surface a clean message.
+    """
+    path = config_path()
+    if not path.exists():
+        return {}
+    with path.open("rb") as handle:
+        raw = tomllib.load(handle)
+
+    unknown = [k for k in raw if k not in _CONFIG_KEYS]
+    if unknown:
+        raise ValueError(f"Unknown config key(s): {', '.join(unknown)}. Known: {', '.join(_CONFIG_KEYS)}.")
+
+    config: dict = {}
+    for key, kind in _CONFIG_SCALARS.items():
+        if key in raw:
+            try:
+                config[key] = kind(raw[key])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Config key {key!r} must be {kind.__name__}.") from exc
+            _validate_scalar(key, config[key])
+    if "exclude" in raw:
+        value = raw["exclude"]
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ValueError("Config key 'exclude' must be a list of provider names.")
+        _validate_providers(value, "exclude")
+        config["exclude"] = value
+    if "models" in raw:
+        models = raw["models"]
+        if not isinstance(models, dict) or not all(isinstance(v, str) for v in models.values()):
+            raise ValueError("Config table '[models]' must map provider names to model strings.")
+        _validate_providers(models, "[models]")
+        config["models"] = dict(models)
+    return config
+
+
+def _toml_str(value: str) -> str:
+    """Serialize a string as a basic TOML string, escaping what would break it.
+
+    Beyond `\\` and `"`, control characters (a stray newline/tab in a model
+    string) must be escaped or the file we write back wouldn't reload, so we
+    map the named escapes TOML defines and \\uXXXX everything else below 0x20.
+    """
+    out: list[str] = []
+    named = {"\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r", '"': '\\"', "\\": "\\\\"}
+    for char in value:
+        if char in named:
+            out.append(named[char])
+        elif ord(char) < 0x20 or ord(char) == 0x7F:
+            out.append(f"\\u{ord(char):04X}")
+        else:
+            out.append(char)
+    return '"' + "".join(out) + '"'
+
+
+def serialize_config(config: dict) -> str:
+    """Render our flat config schema back to TOML text.
+
+    Hand-rolled on purpose (no writer dependency): we only ever emit scalars,
+    the `exclude` string list, and the `[models]` string table, in that order.
+    """
+    lines: list[str] = []
+    if "num" in config:
+        lines.append(f"num = {int(config['num'])}")
+    if "timeout" in config:
+        timeout = float(config["timeout"])
+        # repr() round-trips losslessly via tomllib; trim a whole number's .0
+        # for a tidy file. (`:g` was lossy past 6 significant figures.)
+        lines.append(f"timeout = {int(timeout) if timeout.is_integer() else timeout!r}")
+    if "synthesizer" in config:
+        lines.append(f"synthesizer = {_toml_str(config['synthesizer'])}")
+    if "exclude" in config:
+        items = ", ".join(_toml_str(v) for v in config["exclude"])
+        lines.append(f"exclude = [{items}]")
+    if config.get("models"):
+        lines.append("")
+        lines.append("[models]")
+        for provider, model in config["models"].items():
+            lines.append(f"{provider} = {_toml_str(model)}")
+    return "\n".join(lines) + "\n" if lines else ""
+
+
+def write_config(config: dict) -> None:
+    """Persist the config, creating the directory and file on first write."""
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(serialize_config(config), encoding="utf-8")
+
+
+def _read_config_or_empty() -> dict:
+    """Load config for a verb-specific merge, swallowing errors.
+
+    resolve_run already loads + validates the config and raises a clean
+    BadParameter on a bad file, so by the time a verb merges its own key
+    (e.g. distill's synthesizer) the file is known-good; on the off chance it
+    isn't we return an empty dict rather than raising a second, duplicate error.
+    """
+    try:
+        return load_config()
+    except ValueError:
+        return {}
+
+
+def resolve_option(flag, config_key: str, config: dict, default):
+    """Pick a value by precedence: CLI flag > config file > built-in default.
+
+    `flag` is the value Typer parsed (None when the option was omitted). When
+    it's None we fall back to the config file, then the built-in default. This
+    is the single place the three layers meet, so every verb merges the same way.
+    """
+    if flag is not None:
+        return flag
+    if config_key in config:
+        return config[config_key]
+    return default
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -701,7 +875,7 @@ PromptArg = Annotated[
     str | None, typer.Argument(help="Prompt to send to each agent. Use '-' for stdin.")
 ]
 NumOpt = Annotated[
-    int, typer.Option("--num", "-n", help="How many agents to ask, taken in priority order.")
+    int | None, typer.Option("--num", "-n", help="How many agents to ask, taken in priority order.")
 ]
 ProviderOpt = Annotated[
     list[str] | None,
@@ -718,7 +892,9 @@ ModelOpt = Annotated[
 FileOpt = Annotated[
     Path | None, typer.Option("--file", "-f", help="Read the prompt from a file or '-' for stdin.")
 ]
-TimeoutOpt = Annotated[float, typer.Option("--timeout", "-t", help="Per-agent timeout in seconds.")]
+TimeoutOpt = Annotated[
+    float | None, typer.Option("--timeout", "-t", help="Per-agent timeout in seconds.")
+]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSONL.")]
 YoloOpt = Annotated[
     bool, typer.Option("--yolo", help="Grant agents full write access (default is read-only).")
@@ -740,33 +916,48 @@ class RunConfig:
 def resolve_run(
     prompt: str | None,
     file: Path | None,
-    num: int,
+    num: int | None,
     provider: list[str] | None,
     exclude: list[str] | None,
     model: list[str] | None,
-    timeout: float,
+    timeout: float | None,
     json_output: bool,
     yolo: bool,
 ) -> RunConfig:
     """Resolve the shared options into a RunConfig, emitting the selection note.
 
-    The single place ask/distill (and later debate) funnel the shared options
-    through: read the prompt, parse model overrides, select providers, and print
-    the stderr selection note (including agy's honest partial-protection note).
+    The single place ask/distill/debate funnel the shared options through: read
+    the prompt, MERGE the persisted config (built-in default < config file < CLI
+    flag), parse model overrides, select providers, and print the stderr
+    selection note (including agy's honest partial-protection note). Every verb
+    picks up config defaults identically because the merge lives only here.
     Raises typer.BadParameter on bad input and typer.Exit(1) when nothing runs.
-    Item 008 will merge config defaults here, ahead of selection.
     """
     prompt_text = _read_prompt(prompt, file)
     if not prompt_text:
         raise typer.BadParameter("Prompt cannot be empty.")
+
+    # Merge built-in default < config file < CLI flag for every shared option.
+    try:
+        config = load_config()
+    except ValueError as exc:
+        raise typer.BadParameter(f"{config_path()}: {exc}") from exc
+
+    num = resolve_option(num, "num", config, 3)
+    timeout = resolve_option(timeout, "timeout", config, 180.0)
+    # Repeatable flags are an empty list when omitted, not None, so treat empty
+    # as "fall back to config" for exclude.
+    exclude_names = tuple(exclude) if exclude else tuple(config.get("exclude", ()))
+    # CLI -m overrides win per-provider over config [models]; unnamed providers
+    # keep their config value, then their built-in default.
+    models = {**config.get("models", {}), **parse_model_overrides(model)}
+
     if num < 1:
         raise typer.BadParameter("--num must be at least 1.")
 
-    models = parse_model_overrides(model)
-
     try:
         selected, skipped = select_for_run(
-            num, tuple(provider) if provider else None, tuple(exclude) if exclude else ()
+            num, tuple(provider) if provider else None, exclude_names
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -779,8 +970,8 @@ def resolve_run(
     note = f"Asking {', '.join(p.name for p in selected)} (timeout {timeout:g}s, {mode})"
     if skipped:
         note += f"; skipped (not installed): {', '.join(skipped)}"
-    if exclude:
-        note += f"; excluded: {', '.join(exclude)}"
+    if exclude_names:
+        note += f"; excluded: {', '.join(exclude_names)}"
     # Providers whose default mode is only partial protection (e.g. agy's
     # --sandbox still allows file writes) carry an honest note so the user knows
     # what's actually guarded (not relevant under --yolo).
@@ -796,12 +987,12 @@ def resolve_run(
 @app.command()
 def ask(
     prompt: PromptArg = None,
-    num: NumOpt = 3,
+    num: NumOpt = None,
     provider: ProviderOpt = None,
     exclude: ExcludeOpt = None,
     model: ModelOpt = None,
     file: FileOpt = None,
-    timeout: TimeoutOpt = 180,
+    timeout: TimeoutOpt = None,
     json_output: JsonOpt = False,
     yolo: YoloOpt = False,
 ) -> None:
@@ -818,21 +1009,25 @@ def ask(
 @app.command()
 def distill(
     prompt: PromptArg = None,
-    num: NumOpt = 3,
+    num: NumOpt = None,
     provider: ProviderOpt = None,
     exclude: ExcludeOpt = None,
     model: ModelOpt = None,
     file: FileOpt = None,
-    timeout: TimeoutOpt = 180,
+    timeout: TimeoutOpt = None,
     synthesizer: Annotated[
-        str,
+        str | None,
         typer.Option("--synthesizer", "-s", help="Who distills: auto | random | a provider name."),
-    ] = "auto",
+    ] = None,
     json_output: JsonOpt = False,
     yolo: YoloOpt = False,
 ) -> None:
     """Synthesis: run the council, then one aggregator merges the answers into one."""
     cfg = resolve_run(prompt, file, num, provider, exclude, model, timeout, json_output, yolo)
+
+    # `synthesizer` is verb-specific (not in RunConfig) but still persistable, so
+    # it merges through the same precedence: CLI flag > config file > built-in.
+    synthesizer = resolve_option(synthesizer, "synthesizer", _read_config_or_empty(), "auto")
 
     results = asyncio.run(
         _collect(cfg.selected, cfg.prompt, cfg.timeout, cfg.json_output, cfg.models, cfg.yolo)
@@ -890,12 +1085,12 @@ JudgeOpt = Annotated[
 @app.command()
 def debate(
     prompt: PromptArg = None,
-    num: NumOpt = 3,
+    num: NumOpt = None,
     provider: ProviderOpt = None,
     exclude: ExcludeOpt = None,
     model: ModelOpt = None,
     file: FileOpt = None,
-    timeout: TimeoutOpt = 180,
+    timeout: TimeoutOpt = None,
     rounds: RoundsOpt = 2,
     judge: JudgeOpt = None,
     json_output: JsonOpt = False,
@@ -1022,6 +1217,117 @@ def doctor() -> None:
 
     typer.echo("Available agents: " + fmt(available))
     typer.echo("Missing agents:   " + fmt(missing))
+
+
+# --------------------------------------------------------------------------- #
+# config subcommand: inspect and edit the persisted defaults.
+# --------------------------------------------------------------------------- #
+
+config_app = typer.Typer(
+    name="config",
+    help="Inspect and edit persisted defaults at ~/.moa/config.toml (override the dir with $MOA_CONFIG_DIR).",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(config_app)
+
+
+def _load_config_or_exit() -> dict:
+    try:
+        return load_config()
+    except ValueError as exc:
+        raise typer.BadParameter(f"{config_path()}: {exc}") from exc
+
+
+@config_app.command("path")
+def config_path_cmd() -> None:
+    """Print the config file path."""
+    typer.echo(str(config_path()))
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """Print the effective config (built-in defaults merged with the file) and the file path.
+
+    Output is the same TOML we write, so what you see matches what's stored.
+    """
+    effective = {**_CONFIG_DEFAULTS, **_load_config_or_exit()}
+    typer.echo(f"# {config_path()}")
+    typer.echo(serialize_config(effective).rstrip("\n"))
+
+
+@config_app.command("set")
+def config_set(
+    key: Annotated[str, typer.Argument(help="Config key: num | timeout | synthesizer | exclude | model.")],
+    value: Annotated[str, typer.Argument(help="Value. For models: PROVIDER=MODEL. For exclude: comma-separated names.")],
+) -> None:
+    """Write a value to the config file, creating the dir/file if missing."""
+    config = _load_config_or_exit()
+
+    if key == "model":
+        if "=" not in value:
+            raise typer.BadParameter("model expects PROVIDER=MODEL, e.g. `moa config set model claude=sonnet`.")
+        provider, model = value.split("=", 1)
+        provider = provider.strip()
+        if provider not in PROVIDERS:
+            raise typer.BadParameter(f"Unknown provider: {provider!r}. Known: {', '.join(PROVIDERS)}.")
+        config.setdefault("models", {})[provider] = model
+    elif key == "exclude":
+        names = [name.strip() for name in value.split(",") if name.strip()]
+        try:
+            _validate_providers(names, "exclude")
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        config["exclude"] = names
+    elif key in _CONFIG_SCALARS:
+        kind = _CONFIG_SCALARS[key]
+        try:
+            coerced = kind(value)
+        except ValueError as exc:
+            raise typer.BadParameter(f"{key} must be {kind.__name__}, got {value!r}.") from exc
+        try:
+            _validate_scalar(key, coerced)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        config[key] = coerced
+    else:
+        known = "num, timeout, synthesizer, exclude, model"
+        raise typer.BadParameter(f"Unknown config key: {key!r}. Known: {known}.")
+
+    write_config(config)
+    typer.echo(f"Set {key} in {config_path()}")
+
+
+@config_app.command("unset")
+def config_unset(
+    key: Annotated[str, typer.Argument(help="Config key to remove. Use `model PROVIDER` to drop one model.")],
+    provider: Annotated[str | None, typer.Argument(help="Provider name, only when key is 'model'.")] = None,
+) -> None:
+    """Remove a key from the config file (or a single model with `unset model PROVIDER`)."""
+    config = _load_config_or_exit()
+
+    if key == "model":
+        if not provider:
+            raise typer.BadParameter("unset model expects a provider, e.g. `moa config unset model claude`.")
+        models = config.get("models", {})
+        if provider in models:
+            del models[provider]
+            if not models:
+                config.pop("models", None)
+            write_config(config)
+            typer.echo(f"Unset model {provider} in {config_path()}")
+        else:
+            typer.echo(f"model {provider} was not set.")
+        return
+
+    if key not in _CONFIG_KEYS:
+        raise typer.BadParameter(f"Unknown config key: {key!r}. Known: {', '.join(_CONFIG_KEYS)}.")
+    if key in config:
+        del config[key]
+        write_config(config)
+        typer.echo(f"Unset {key} in {config_path()}")
+    else:
+        typer.echo(f"{key} was not set.")
 
 
 def main() -> None:

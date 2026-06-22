@@ -123,6 +123,50 @@ The model-string format differs per tool and is passed through verbatim (the too
 
 `opencode` has no built-in default; without an override it omits `-m` and lets opencode pick. Pass `-m opencode=provider/model` to pin one.
 
+### Configuration
+
+To avoid repeating the same flags on every call, persist your own defaults in a config file. MOA reads it for every verb and merges it under your flags.
+
+**Location.** `~/.moa/config.toml` (the dir is created on first write). Set `$MOA_CONFIG_DIR` to point the whole config layer somewhere else (useful in tests/CI).
+
+**Precedence.** `built-in default  <  config file  <  CLI flag`. A flag always wins; the config file only changes a default when that flag is omitted; an absent file means today's built-in behaviour.
+
+**Keys** (all shared across `ask`/`distill`/`debate`):
+
+| Key           | Type                    | Example                       |
+| ------------- | ----------------------- | ----------------------------- |
+| `num`         | int (>= 1)              | `num = 2`                     |
+| `timeout`     | seconds (> 0)           | `timeout = 120`               |
+| `exclude`     | list of provider names  | `exclude = ["claude"]`        |
+| `synthesizer` | `auto`/`random`/provider | `synthesizer = "codex"`      |
+| `[models]`    | provider -> model table | `claude = "sonnet"`           |
+
+```toml
+# ~/.moa/config.toml
+num = 2
+timeout = 120
+exclude = ["claude"]
+synthesizer = "auto"
+
+[models]
+claude = "sonnet"
+agy = "Gemini 3.1 Pro (Low)"
+```
+
+**`moa config`** inspects and edits the file (it creates the dir/file as needed and validates provider names):
+
+```bash
+moa config show                       # effective config (defaults + file) + path
+moa config path                       # print the config file path
+moa config set num 2                  # set a scalar
+moa config set exclude claude,codex   # set the exclude list (comma-separated)
+moa config set model claude=sonnet    # set one entry in [models]
+moa config unset num                  # remove a key
+moa config unset model claude         # remove one [models] entry
+```
+
+The synthesizer default is persistable too (e.g. `moa config set synthesizer codex`); `debate`'s `-r/--rounds` and `-j/--judge` are not persisted. CLI `-m` overrides win per-provider over the config `[models]` table.
+
 ### Output
 
 - **stdout** carries only content: each agent's answer as a Markdown block (`## claude (opus) - OK - 3.5s`), flushed the instant that agent finishes. `moa distill` then appends the merged block (`## synthesis · via claude - OK - ...`) once the aggregator finishes.
