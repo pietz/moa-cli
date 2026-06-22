@@ -300,16 +300,25 @@ async def stream(
 # Synthesis: merge the collected answers into one unified answer.
 # --------------------------------------------------------------------------- #
 
-SYNTHESIZER_PROMPT = """You are the synthesizer in a mixture-of-agents system. You are given a \
-user's question and several independent answers produced by different AI assistants. Produce a \
-single, unified answer that is more accurate, complete, and useful than any individual response.
+# Aligned to the Mixture-of-Agents "Aggregate-and-Synthesize" prompt (Wang et al.
+# 2024, togethercomputer/MoA), adapted "open-source models" -> "AI coding
+# assistants". The two load-bearing clauses are kept nearly verbatim: critically
+# evaluate (some may be biased or incorrect) and do not simply replicate (offer a
+# refined, accurate, comprehensive reply).
+SYNTHESIZER_PROMPT = """You have been provided with a set of responses from various AI coding \
+assistants to the latest user question. Your task is to synthesize these responses into a single, \
+high-quality response. It is crucial to critically evaluate the information provided in these \
+responses, recognizing that some of it may be biased or incorrect. Your response should not simply \
+replicate the given answers but should offer a refined, accurate, comprehensive, and well-structured \
+reply to the question. Ensure your response is the best possible answer, addressing all aspects of \
+the question.
 
 Guidelines:
-- Identify where the answers agree, where they complement each other, and where they conflict.
+- Identify where the responses agree, where they complement each other, and where they conflict.
 - Resolve conflicts by the quality of reasoning and evidence; use agreement as a tiebreaker.
 - Keep what is correct and valuable; drop what is wrong, redundant, or unsupported.
-- Write a clear, well-structured, self-contained answer. Do not refer to "Response A", the other \
-answers, or the fact that you are synthesizing. Just give the best possible answer.
+- Do not refer to "Response A", the responses, or the fact that you are synthesizing. Just give the \
+best possible answer.
 - Do not invent information that none of the responses support."""
 
 
@@ -491,36 +500,73 @@ async def _collect(
     return results
 
 
-@app.command()
-def ask(
-    prompt: Annotated[str | None, typer.Argument(help="Prompt to send to each agent. Use '-' for stdin.")] = None,
-    num: Annotated[int, typer.Option("--num", "-n", help="How many agents to ask, taken in priority order.")] = 3,
-    provider: Annotated[
-        list[str] | None,
-        typer.Option("--provider", "-p", help="Pin specific agent(s). Repeatable. Overrides --num."),
-    ] = None,
-    exclude: Annotated[
-        list[str] | None,
-        typer.Option("--exclude", "-x", help="Drop agent(s) from the run. Repeatable."),
-    ] = None,
-    model: Annotated[
-        list[str] | None,
-        typer.Option("--model", "-m", help="Override a tool's model: PROVIDER=MODEL. Repeatable."),
-    ] = None,
-    file: Annotated[Path | None, typer.Option("--file", "-f", help="Read the prompt from a file or '-' for stdin.")] = None,
-    timeout: Annotated[float, typer.Option("--timeout", "-t", help="Per-agent timeout in seconds.")] = 180,
-    synth: Annotated[bool, typer.Option("--synth", help="Also synthesize the answers into one unified answer.")] = False,
-    synthesizer: Annotated[
-        str,
-        typer.Option("--synthesizer", help="Who synthesizes: auto | random | a provider name."),
-    ] = "auto",
-    json_output: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSONL.")] = False,
-    yolo: Annotated[
-        bool,
-        typer.Option("--yolo", help="Grant agents full write access (default is read-only)."),
-    ] = False,
-) -> None:
-    """Ask multiple agents in parallel; answers stream back as each one finishes."""
+# --------------------------------------------------------------------------- #
+# Shared options: every prompt verb (ask, distill, and later debate) takes the
+# same selection/IO options. They are declared ONCE as reusable Annotated types
+# and resolved ONCE by `resolve_run`, which returns a RunConfig the verbs act on.
+# Item 008 (config) plugs a config-default merge into resolve_run; stage 2
+# (debate) reuses both the option types and the resolver unchanged.
+# --------------------------------------------------------------------------- #
+
+PromptArg = Annotated[
+    str | None, typer.Argument(help="Prompt to send to each agent. Use '-' for stdin.")
+]
+NumOpt = Annotated[
+    int, typer.Option("--num", "-n", help="How many agents to ask, taken in priority order.")
+]
+ProviderOpt = Annotated[
+    list[str] | None,
+    typer.Option("--provider", "-p", help="Pin specific agent(s). Repeatable. Overrides --num."),
+]
+ExcludeOpt = Annotated[
+    list[str] | None,
+    typer.Option("--exclude", "-x", help="Drop agent(s) from the run. Repeatable."),
+]
+ModelOpt = Annotated[
+    list[str] | None,
+    typer.Option("--model", "-m", help="Override a tool's model: PROVIDER=MODEL. Repeatable."),
+]
+FileOpt = Annotated[
+    Path | None, typer.Option("--file", "-f", help="Read the prompt from a file or '-' for stdin.")
+]
+TimeoutOpt = Annotated[float, typer.Option("--timeout", "-t", help="Per-agent timeout in seconds.")]
+JsonOpt = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSONL.")]
+YoloOpt = Annotated[
+    bool, typer.Option("--yolo", help="Grant agents full write access (default is read-only).")
+]
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    """Everything a prompt verb needs after the shared options are resolved."""
+
+    prompt: str
+    selected: list[Provider]
+    models: dict[str, str]
+    timeout: float
+    json_output: bool
+    yolo: bool
+
+
+def resolve_run(
+    prompt: str | None,
+    file: Path | None,
+    num: int,
+    provider: list[str] | None,
+    exclude: list[str] | None,
+    model: list[str] | None,
+    timeout: float,
+    json_output: bool,
+    yolo: bool,
+) -> RunConfig:
+    """Resolve the shared options into a RunConfig, emitting the selection note.
+
+    The single place ask/distill (and later debate) funnel the shared options
+    through: read the prompt, parse model overrides, select providers, and print
+    the stderr selection note (including agy's honest partial-protection note).
+    Raises typer.BadParameter on bad input and typer.Exit(1) when nothing runs.
+    Item 008 will merge config defaults here, ahead of selection.
+    """
     prompt_text = _read_prompt(prompt, file)
     if not prompt_text:
         raise typer.BadParameter("Prompt cannot be empty.")
@@ -555,47 +601,89 @@ def ask(
                 note += f"; note: {p.readonly_note}"
     _note(note)
 
-    results = asyncio.run(_collect(selected, prompt_text, timeout, json_output, models, yolo))
+    return RunConfig(prompt_text, selected, models, timeout, json_output, yolo)
+
+
+@app.command()
+def ask(
+    prompt: PromptArg = None,
+    num: NumOpt = 3,
+    provider: ProviderOpt = None,
+    exclude: ExcludeOpt = None,
+    model: ModelOpt = None,
+    file: FileOpt = None,
+    timeout: TimeoutOpt = 180,
+    json_output: JsonOpt = False,
+    yolo: YoloOpt = False,
+) -> None:
+    """Council / peer review: ask N agents in parallel; answers stream back as each finishes."""
+    cfg = resolve_run(prompt, file, num, provider, exclude, model, timeout, json_output, yolo)
+
+    results = asyncio.run(
+        _collect(cfg.selected, cfg.prompt, cfg.timeout, cfg.json_output, cfg.models, cfg.yolo)
+    )
+    if not any(r.status == "ok" for r in results):
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def distill(
+    prompt: PromptArg = None,
+    num: NumOpt = 3,
+    provider: ProviderOpt = None,
+    exclude: ExcludeOpt = None,
+    model: ModelOpt = None,
+    file: FileOpt = None,
+    timeout: TimeoutOpt = 180,
+    synthesizer: Annotated[
+        str,
+        typer.Option("--synthesizer", "-s", help="Who distills: auto | random | a provider name."),
+    ] = "auto",
+    json_output: JsonOpt = False,
+    yolo: YoloOpt = False,
+) -> None:
+    """Synthesis: run the council, then one aggregator merges the answers into one."""
+    cfg = resolve_run(prompt, file, num, provider, exclude, model, timeout, json_output, yolo)
+
+    results = asyncio.run(
+        _collect(cfg.selected, cfg.prompt, cfg.timeout, cfg.json_output, cfg.models, cfg.yolo)
+    )
     successes = [r for r in results if r.status == "ok"]
 
-    if synth:
-        _run_synthesis(prompt_text, results, successes, selected, synthesizer, timeout, json_output, models, yolo)
+    _run_synthesis(cfg, results, successes, synthesizer)
 
     if not successes:
         raise typer.Exit(code=1)
 
 
 def _run_synthesis(
-    prompt_text: str,
+    cfg: RunConfig,
     results: list[RunResult],
     successes: list[RunResult],
-    selected: list[Provider],
     synthesizer: str,
-    timeout: float,
-    json_output: bool,
-    models: dict[str, str] | None = None,
-    yolo: bool = False,
 ) -> None:
     if len(successes) < 2:
-        _note("Synthesis skipped: need at least 2 successful responses.")
+        _note("Distill skipped: need at least 2 successful responses.")
         return
 
-    candidates = [p.name for p in selected]
+    candidates = [p.name for p in cfg.selected]
     try:
         synth_name = choose_synthesizer(synthesizer, candidates)
     except ValueError as exc:
-        _note(f"Synthesis skipped: {exc}")
+        _note(f"Distill skipped: {exc}")
         return
 
-    # Synthesis always anonymizes + shuffles its input so the synthesizer can't
-    # favour a brand. The A/B/C labels stay internal; the human already sees real
-    # names on the response blocks above.
-    synth_prompt, _label_map = build_synthesis_prompt(prompt_text, results, blind=True)
-    _note(f"Synthesizing with {synth_name}...")
-    synth_model = (models or {}).get(synth_name)
-    synth_result = asyncio.run(run_provider(PROVIDERS[synth_name], synth_prompt, timeout, synth_model, yolo))
+    # The aggregator always gets the proposer answers anonymized + shuffled so it
+    # can't favour a brand (item 002, no toggle). The A/B/C labels stay internal;
+    # the human already sees real names on the response blocks above.
+    synth_prompt, _label_map = build_synthesis_prompt(cfg.prompt, results, blind=True)
+    _note(f"Distilling with {synth_name}...")
+    synth_model = cfg.models.get(synth_name)
+    synth_result = asyncio.run(
+        run_provider(PROVIDERS[synth_name], synth_prompt, cfg.timeout, synth_model, cfg.yolo)
+    )
 
-    if json_output:
+    if cfg.json_output:
         _emit(json.dumps(synthesis_record(synth_result, synth_name)))
     else:
         _emit(render_synthesis_block(synth_result, synth_name))

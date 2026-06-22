@@ -8,7 +8,7 @@
 
 # MOA - Mixture of Agents
 
-Ask one question to multiple local AI coding CLIs **in parallel** and collect their answers. MOA detects which agent CLIs you have installed (Claude Code, Codex, agy, opencode), fans your prompt out to them, and streams each answer back the moment that agent finishes. Optionally, it can synthesize the answers into a single unified response.
+Ask one question to multiple local AI coding CLIs **in parallel** and collect their answers. MOA detects which agent CLIs you have installed (Claude Code, Codex, agy, opencode), fans your prompt out to them, and streams each answer back the moment that agent finishes. Or run `moa distill` to have a strong aggregator merge those answers into a single unified response.
 
 It's a drop-in, batteries-included replacement for hand-rolling parallel `claude -p` / `codex exec` / `opencode run` calls (or a "peer review" agent skill): one command, clean attributed output, made to be called by a human **or** by another agent.
 
@@ -31,6 +31,11 @@ A single model gives you one perspective. Asking three frontier models the same 
 
 ## Usage
 
+MOA has two prompt verbs that share the same selection/output options:
+
+- **`moa ask PROMPT`** - council / peer review: N agents answer the same prompt in parallel; every answer is returned with attribution, streamed as it lands.
+- **`moa distill PROMPT`** - synthesis: run the council, then one strong aggregator merges the answers into a single unified response.
+
 ```bash
 moa doctor                                  # show installed CLIs and their default models
 moa ask "Should this feature use SQLite?"   # ask the top 3 installed agents (read-only)
@@ -39,10 +44,13 @@ moa ask -p claude -p agy "..."              # pin specific agents
 moa ask -x claude "..."                     # drop an agent (e.g. exclude the caller's own model)
 moa ask -m claude=sonnet "..."              # override which model a tool uses
 moa ask --yolo "..."                        # grant full write access (default is read-only)
-moa ask --synth "..."                       # also merge the answers into one
 moa ask --json "..."                        # machine-readable JSONL (for agents/pipes)
 git diff | moa ask -f - "Review this diff." # read the prompt from stdin
+moa distill "Design a rate limiter."        # council, then merge into one answer
+moa distill -s codex "..."                  # pick who distills (auto | random | provider)
 ```
+
+The shared options (`-n/--num`, `-p/--provider`, `-x/--exclude`, `-m/--model`, `-t/--timeout`, `-f/--file`, `--json`, `--yolo`) work identically on both verbs. `distill` adds `-s/--synthesizer`.
 
 ### Read-only by default
 
@@ -113,23 +121,27 @@ The model-string format differs per tool and is passed through verbatim (the too
 
 ### Output
 
-- **stdout** carries only content: each agent's answer as a Markdown block (`## claude (opus) - OK - 3.5s`), flushed the instant that agent finishes, then the synthesis block if `--synth` is set.
+- **stdout** carries only content: each agent's answer as a Markdown block (`## claude (opus) - OK - 3.5s`), flushed the instant that agent finishes. `moa distill` then appends the merged block (`## synthesis · via claude - OK - ...`) once the aggregator finishes.
 - **stderr** carries progress and selection notes (`Asking claude, codex ...`), so piping stdout stays clean.
-- `--json` emits one JSON object per line (JSONL): a `{"type": "response", ...}` record per agent as it completes, then a `{"type": "synthesis", ...}` record. Ideal when another agent calls MOA and parses the result.
+- `--json` emits one JSON object per line (JSONL): a `{"type": "response", ...}` record per agent as it completes; `distill` then adds a `{"type": "synthesis", ...}` record. Ideal when another agent calls MOA and parses the result.
 
-### Synthesis
+### `moa distill` (synthesis)
 
-`--synth` runs one more pass that merges the collected answers into a single, unified answer. The synthesizer is chosen with `--synthesizer`:
+`distill` runs the same council fan-out as `ask`, then one more pass where a strong aggregator merges the collected answers into a single, unified answer. It needs at least two successful proposer answers; with fewer it streams what it has and skips the merge. The aggregator is chosen with `-s/--synthesizer`:
 
 - `auto` (default) - the highest-priority agent that ran (deterministic)
 - `random` - pick one of the agents that ran, at random
 - a provider name (`claude`, `codex`, `agy`, `opencode`)
 
+The aggregator prompt is adapted from the Mixture-of-Agents "Aggregate-and-Synthesize" prompt (Wang et al. 2024): it tells the aggregator to critically evaluate the inputs (some may be biased or incorrect) and not to simply replicate them but offer a refined, accurate, comprehensive reply.
+
+> **Coming in a later release:** `moa debate` - a sequential round-robin where models critique each other's answers and a neutral judge synthesizes the verdict.
+
 ### Attribution policy
 
 The human (or agent) reading MOA's output **always gets correct attribution**: every response block shows the real provider name. There is no human-facing anonymization toggle.
 
-The synthesizer is a different story. To stop it picking favourites by brand, it **always** receives the proposer answers anonymized as "Response A / B / C" and order-shuffled. This is always-on internal behaviour, not a flag. The synthesized answer itself is brand-agnostic prose, and the A/B/C labels never leak into stdout, stderr, or the JSON.
+The `distill` aggregator is a different story. To stop it picking favourites by brand, it **always** receives the proposer answers anonymized as "Response A / B / C" and order-shuffled (no toggle). The merged answer itself is brand-agnostic prose, and the A/B/C labels never leak into stdout, stderr, or the JSON.
 
 ## Supported agents
 
@@ -142,7 +154,7 @@ Invocations below show the default (read-only) flags; `--yolo` swaps in each too
 | `agy`       | `agy`      | `agy --sandbox --model "Gemini 3.1 Pro (High)" -p PROMPT` (partial: shell only - can still edit files) |
 | `opencode`  | `opencode` | `opencode run --agent plan PROMPT`                                  |
 
-Adding a new agent is a single entry in the `PROVIDERS` table in `src/moa_cli/cli.py` (executable, default model, command builder); it then participates in detection, `-n` selection, and synthesis automatically.
+Adding a new agent is a single entry in the `PROVIDERS` table in `src/moa_cli/cli.py` (executable, default model, command builder, permission flags); it then participates in detection, `-n` selection, and `distill` automatically.
 
 ## Development
 

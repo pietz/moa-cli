@@ -424,3 +424,188 @@ def test_ask_omits_agy_note_under_yolo(monkeypatch) -> None:
     result = runner.invoke(cli.app, ["ask", "-p", "agy", "--yolo", "hi"])
     assert result.exit_code == 0
     assert "can still edit files" not in result.stderr
+
+
+# --- verbs (ask / distill / doctor) -----------------------------------------
+
+
+def _install_all(monkeypatch) -> None:
+    installed = {"claude", "codex", "agy", "opencode"}
+    monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
+
+
+def test_subcommands_registered() -> None:
+    # The CLI is a set of verbs now, not a single command.
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["--help"])
+    assert result.exit_code == 0
+    for verb in ("ask", "distill", "doctor"):
+        assert verb in result.stdout
+    # Stage 2 lands debate; it must not be wired up yet.
+    assert "debate" not in result.stdout
+
+
+def test_ask_has_no_synth_flags() -> None:
+    # --synth and --synthesizer were removed from ask; verbs replace them.
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["ask", "--help"])
+    assert result.exit_code == 0
+    assert "--synth" not in result.stdout
+    assert "--synthesizer" not in result.stdout
+
+
+def test_ask_help_shows_shared_options() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["ask", "--help"])
+    assert result.exit_code == 0
+    for opt in ("--num", "--provider", "--exclude", "--model", "--timeout", "--file", "--json", "--yolo"):
+        assert opt in result.stdout
+
+
+def test_distill_help_shows_shared_options_and_synthesizer() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["distill", "--help"])
+    assert result.exit_code == 0
+    for opt in ("--num", "--provider", "--exclude", "--model", "--timeout", "--file", "--json", "--yolo"):
+        assert opt in result.stdout
+    # --synthesizer lives only on distill.
+    assert "--synthesizer" in result.stdout
+
+
+def test_ask_is_council_no_synthesis(monkeypatch) -> None:
+    # ask fans out and prints each answer; it never emits a synthesis/distill block.
+    _install_all(monkeypatch)
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["ask", "-p", "claude", "-p", "codex", "hi"])
+    assert result.exit_code == 0
+    assert "## claude" in result.stdout and "## codex" in result.stdout
+    assert "synthesis" not in result.stdout
+
+
+def test_distill_runs_council_then_merges(monkeypatch) -> None:
+    # distill streams the proposer answers, then a single merged block last.
+    _install_all(monkeypatch)
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        return _ok("claude", "merged answer")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["distill", "-p", "claude", "-p", "codex", "hi"])
+    assert result.exit_code == 0
+    assert "## claude" in result.stdout and "## codex" in result.stdout
+    assert "## synthesis · via claude" in result.stdout
+    assert "merged answer" in result.stdout
+    # The merged block comes after both proposer blocks.
+    assert result.stdout.index("synthesis") > result.stdout.index("## codex")
+
+
+def test_distill_aggregator_input_is_blind_and_shuffled(monkeypatch) -> None:
+    # The aggregator must receive anonymized + shuffled answers (item 002, no toggle).
+    _install_all(monkeypatch)
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "ALPHA"), _ok("codex", "BETA")))
+    captured: dict = {}
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        captured["prompt"] = prompt
+        return _ok("claude", "merged")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["distill", "-p", "claude", "-p", "codex", "hi"])
+    assert result.exit_code == 0
+    # Anonymized: real provider names never reach the aggregator prompt.
+    assert "claude" not in captured["prompt"] and "codex" not in captured["prompt"]
+    assert "### Response A" in captured["prompt"] and "### Response B" in captured["prompt"]
+    assert "ALPHA" in captured["prompt"] and "BETA" in captured["prompt"]
+
+
+def test_distill_synthesizer_selection(monkeypatch) -> None:
+    # -s/--synthesizer pins who distills; the chosen provider runs the merge.
+    _install_all(monkeypatch)
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
+    captured: dict = {}
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        captured["provider"] = provider.name
+        return _ok(provider.name, "merged")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["distill", "-p", "claude", "-p", "codex", "-s", "codex", "hi"])
+    assert result.exit_code == 0
+    assert captured["provider"] == "codex"
+    assert "## synthesis · via codex" in result.stdout
+
+
+def test_distill_skips_with_fewer_than_two_successes(monkeypatch) -> None:
+    # With a single successful proposer there is nothing to distill.
+    _install_all(monkeypatch)
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A")))
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        raise AssertionError("aggregator must not run with <2 successes")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["distill", "-p", "claude", "hi"])
+    assert result.exit_code == 0
+    assert "Distill skipped" in result.stderr
+    assert "synthesis" not in result.stdout
+
+
+def test_distill_aggregator_is_read_only_by_default(monkeypatch) -> None:
+    # Regression (009 follow-up): the distill aggregator run must be read-only
+    # unless --yolo is passed. yolo defaults to False on the aggregator call.
+    _install_all(monkeypatch)
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
+    captured: dict = {}
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        captured["yolo"] = yolo
+        return _ok("claude", "merged")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["distill", "-p", "claude", "-p", "codex", "hi"])
+    assert result.exit_code == 0
+    assert captured["yolo"] is False
+
+
+def test_distill_aggregator_yolo_propagates(monkeypatch) -> None:
+    _install_all(monkeypatch)
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
+    captured: dict = {}
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        captured["yolo"] = yolo
+        return _ok("claude", "merged")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["distill", "-p", "claude", "-p", "codex", "--yolo", "hi"])
+    assert result.exit_code == 0
+    assert captured["yolo"] is True
+
+
+def test_distill_emits_agy_partial_protection_note(monkeypatch) -> None:
+    # Shared resolver: distill surfaces agy's honest note exactly like ask.
+    _install_all(monkeypatch)
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("agy", "OK")))
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["distill", "-p", "agy", "hi"])
+    assert result.exit_code == 0
+    assert "agy is shell-sandboxed but can still edit files (no true read-only mode)" in result.stderr
+
+
+def test_synthesizer_prompt_keeps_load_bearing_clauses() -> None:
+    # The aggregator prompt must keep the MoA load-bearing instructions.
+    text = cli.SYNTHESIZER_PROMPT
+    assert "biased or incorrect" in text
+    assert "not simply replicate" in text
+    assert "refined, accurate, comprehensive" in text
+    # Adapted away from "open-source models".
+    assert "AI coding assistants" in text
+    assert "open-source" not in text
