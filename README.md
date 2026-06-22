@@ -56,13 +56,15 @@ is enforced by spawning each CLI with its own read-only flags:
 | `claude`   | `--permission-mode plan`   | yes         | yes                       |
 | `codex`    | `-s read-only`             | yes         | **no** (sandbox blocks network) |
 | `opencode` | `--agent plan`             | yes         | yes                       |
-| `agy`      | none (runs unsandboxed)    | yes         | yes                       |
+| `agy`      | `--sandbox` (partial: shell only - can still edit files) | yes | yes |
 
 `codex`'s read-only mode is a kernel sandbox that also blocks network, so codex does no
-web research in the default mode (it still reads local files). `agy` has **no read-only
-mode** that stops its file-writing tools, so it runs **unscoped** (it can write) even in the
-default mode. It still stays in the panel; the selection note on stderr flags that `agy`
-runs unsandboxed so you know.
+web research in the default mode (it still reads local files). `agy` has **no true
+read-only mode**: its `--sandbox` flag restricts agy's terminal/shell but does **not** stop
+its `write_file` tool, so agy **can still edit files** even in the default mode. This is
+**partial** protection (it closes the shell vector only), not read-only. moa applies
+`--sandbox` as the next-best safeguard and the selection note on stderr states honestly that
+`agy` is shell-sandboxed but can still edit files.
 
 ### `--yolo` (full write access)
 
@@ -73,9 +75,10 @@ auto-approved). Use it only when you actually want the agents to change your wor
 moa ask --yolo "Refactor this module and run the tests."
 ```
 
-Under `--yolo` every agent (including `agy`) gets full write access. In the default mode,
-`agy` still runs because it has no read-only mode to apply: it runs unscoped, and MOA notes
-that on stderr.
+Under `--yolo` every agent gets full write access. For `agy` this means dropping
+`--sandbox`, so `agy --yolo` runs with no shell restrictions at all. In the default mode,
+`agy` runs with `--sandbox` (partial protection: shell only - it can still edit files), and
+MOA states that honestly on stderr.
 
 ### How agents are selected
 
@@ -85,7 +88,7 @@ that on stderr.
 claude  ->  codex  ->  agy  ->  opencode
 ```
 
-So `moa ask -n 3` on a machine with all four installed asks Claude, Codex, and agy (opencode is #4). `agy` has no read-only mode, so it runs unscoped (unsandboxed) and MOA flags that with a note on stderr; it is **not** excluded. Use `-p/--provider` (repeatable) to pin an exact set and ignore `-n`.
+So `moa ask -n 3` on a machine with all four installed asks Claude, Codex, and agy (opencode is #4). `agy` has no true read-only mode, so in the default mode it runs with `--sandbox` (partial protection: shell only - it can still edit files) and MOA flags that with an honest note on stderr; it is **not** excluded. Use `-p/--provider` (repeatable) to pin an exact set and ignore `-n`.
 
 Use `-x/--exclude` (repeatable) to drop one or more agents from the run. Exclusion is applied *before* `-n` takes the first N, and it also drops excluded names from an explicit `-p` set. It is off by default. The motivating case: an agent (e.g. Claude Code) calls `moa` for *other* opinions; `moa ask -x claude` makes sure one "peer" isn't just the caller's own model. So `moa ask -n 3 -x claude` asks Codex, agy, and opencode.
 
@@ -136,7 +139,7 @@ Invocations below show the default (read-only) flags; `--yolo` swaps in each too
 | ----------- | ---------- | ------------------------------------------------------------------- |
 | `claude`    | `claude`   | `claude --model opus --permission-mode plan -p PROMPT`              |
 | `codex`     | `codex`    | `codex exec -m gpt-5.5 --skip-git-repo-check -s read-only PROMPT`   |
-| `agy`       | `agy`      | `agy --model "Gemini 3.1 Pro (High)" -p PROMPT` (runs unsandboxed) |
+| `agy`       | `agy`      | `agy --sandbox --model "Gemini 3.1 Pro (High)" -p PROMPT` (partial: shell only - can still edit files) |
 | `opencode`  | `opencode` | `opencode run --agent plan PROMPT`                                  |
 
 Adding a new agent is a single entry in the `PROVIDERS` table in `src/moa_cli/cli.py` (executable, default model, command builder); it then participates in detection, `-n` selection, and synthesis automatically.

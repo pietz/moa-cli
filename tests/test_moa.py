@@ -62,10 +62,12 @@ def test_perm_args_readonly_vs_yolo_per_provider() -> None:
     assert PROVIDERS["codex"].perm_args(yolo=True) == ("-s", "danger-full-access")
     assert PROVIDERS["opencode"].perm_args(yolo=False) == ("--agent", "plan")
     assert PROVIDERS["opencode"].perm_args(yolo=True) == ()
-    # agy has no read-only mode; default run is unscoped (no perm args) and
-    # under --yolo it gets full access (also no extra flag).
-    assert PROVIDERS["agy"].readonly is None
-    assert PROVIDERS["agy"].perm_args(yolo=False) == ()
+    # agy's --sandbox is only PARTIAL protection (shell vector; it can still edit
+    # files), so the default run carries --sandbox plus an honest readonly_note,
+    # and under --yolo it drops --sandbox for full access.
+    assert PROVIDERS["agy"].readonly == ("--sandbox",)
+    assert PROVIDERS["agy"].readonly_note is not None
+    assert PROVIDERS["agy"].perm_args(yolo=False) == ("--sandbox",)
     assert PROVIDERS["agy"].perm_args(yolo=True) == ()
 
 
@@ -264,8 +266,9 @@ def test_run_provider_readonly_by_default_argv(monkeypatch) -> None:
     assert captured["argv"][captured["argv"].index("--agent") + 1] == "plan"
 
 
-def test_run_provider_agy_default_argv_has_no_readonly_flag(monkeypatch) -> None:
-    # agy has no read-only mode, so its default argv runs unscoped (no perm flag).
+def test_run_provider_agy_default_argv_has_sandbox(monkeypatch) -> None:
+    # agy's default argv includes --sandbox (partial: shell only - it can still
+    # edit files). Under --yolo (below) --sandbox is dropped for full access.
     captured: dict = {}
 
     async def fake_exec(*args, **kwargs):
@@ -274,7 +277,11 @@ def test_run_provider_agy_default_argv_has_no_readonly_flag(monkeypatch) -> None
 
     monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
     asyncio.run(run_provider(PROVIDERS["agy"], "hi", timeout=5, model="g"))
+    assert captured["argv"] == ["agy", "--sandbox", "--model", "g", "-p", "hi"]
+
+    asyncio.run(run_provider(PROVIDERS["agy"], "hi", timeout=5, model="g", yolo=True))
     assert captured["argv"] == ["agy", "--model", "g", "-p", "hi"]
+    assert "--sandbox" not in captured["argv"]
 
 
 def test_run_provider_yolo_argv(monkeypatch) -> None:
@@ -380,6 +387,40 @@ def test_doctor_shows_default_models(monkeypatch) -> None:
     assert "claude (opus)" in result.stdout
     assert "codex (gpt-5.5)" in result.stdout
     assert "opencode (configured default)" in result.stdout
-    # agy shows its model and the no-read-only / unsandboxed marker.
+    # agy shows its model and the partial-sandbox marker (shell only; still edits).
     assert "agy (Gemini 3.1 Pro (High))" in result.stdout
-    assert "no read-only mode (runs unsandboxed)" in result.stdout
+    assert "partial sandbox - shell only; can still edit files" in result.stdout
+
+
+# --- ask selection note -----------------------------------------------------
+
+
+def _fake_stream(*results: RunResult):
+    async def stream(providers, prompt, timeout, models=None, yolo=False):
+        for r in results:
+            yield r
+
+    return stream
+
+
+def test_ask_emits_agy_partial_protection_note(monkeypatch) -> None:
+    # When agy runs in the default (non-yolo) mode, the stderr selection note
+    # must honestly state agy is shell-sandboxed but can still edit files.
+    installed = {"claude", "codex", "agy", "opencode"}
+    monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("agy", "OK")))
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["ask", "-p", "agy", "hi"])
+    assert result.exit_code == 0
+    assert "agy is shell-sandboxed but can still edit files (no true read-only mode)" in result.stderr
+
+
+def test_ask_omits_agy_note_under_yolo(monkeypatch) -> None:
+    # Under --yolo agy drops --sandbox (full access), so no partial-protection note.
+    installed = {"claude", "codex", "agy", "opencode"}
+    monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("agy", "OK")))
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["ask", "-p", "agy", "--yolo", "hi"])
+    assert result.exit_code == 0
+    assert "can still edit files" not in result.stderr

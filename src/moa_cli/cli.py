@@ -48,6 +48,11 @@ class Provider:
     # --yolo to grant full write access.
     readonly: tuple[str, ...] | None = ()
     yolo: tuple[str, ...] = ()
+    # When the default ("readonly") flags give only PARTIAL protection - they
+    # restrict something but do not fully prevent file writes - this holds an
+    # honest one-line note moa surfaces on stderr. `None` means the default mode
+    # is true read-only (or the tool has no read-only mode at all).
+    readonly_note: str | None = None
     # Env keys to drop before spawning. claude refuses to run nested inside
     # Claude Code unless CLAUDECODE is cleared, so moa can call it from an agent.
     unset_env: tuple[str, ...] = ()
@@ -66,7 +71,7 @@ class Provider:
         """The permission argv for this run: yolo flags under --yolo, else readonly."""
         if yolo:
             return self.yolo
-        # readonly is None for tools with no read-only mode (agy): they run
+        # readonly is None for tools with no scoping flag at all: they run
         # unscoped, with no permission args spliced in.
         return self.readonly or ()
 
@@ -86,7 +91,9 @@ def _codex(prompt: str, model: str, out: str | None, perm: tuple[str, ...]) -> l
 def _agy(prompt: str, model: str, _out: str | None, perm: tuple[str, ...]) -> list[str]:
     # agy also hosts Claude/GPT-OSS models, so we pin a Gemini model explicitly
     # to keep the panel diverse. Without --model it defaults to Gemini Flash.
-    return ["agy", "--model", model, *perm, "-p", prompt]
+    # perm (e.g. --sandbox) goes first so the default reads `agy --sandbox
+    # --model ... -p ...`.
+    return ["agy", *perm, "--model", model, "-p", prompt]
 
 
 def _opencode(prompt: str, model: str, _out: str | None, perm: tuple[str, ...]) -> list[str]:
@@ -115,7 +122,12 @@ PROVIDERS: dict[str, Provider] = {
     ),
     "agy": Provider(
         "agy", "agy", "Gemini 3.1 Pro (High)", _agy,
-        readonly=None,  # no read-only mode -> runs unscoped (unsandboxed) by default
+        # --sandbox restricts agy's terminal/shell but does NOT stop its
+        # write_file tool, so this is PARTIAL protection (shell vector only),
+        # not true read-only: agy can still edit files. readonly_note makes that
+        # honest on stderr. Under --yolo agy drops --sandbox (full access).
+        readonly=("--sandbox",),
+        readonly_note="agy is shell-sandboxed but can still edit files (no true read-only mode)",
         yolo=(),
     ),
     "opencode": Provider(
@@ -154,9 +166,10 @@ def select_for_run(
     PRIORITY. Excluded providers are dropped before either path takes effect, so
     `-n` counts only non-excluded installs and `-p` pins drop excluded names too.
 
-    All installed providers are eligible, including ones with no read-only mode
-    (`readonly is None`); those run unscoped by default - the caller surfaces an
-    "unsandboxed" note on stderr rather than dropping or erroring on them.
+    All installed providers are eligible, including ones whose default mode is
+    only partial protection (e.g. agy's --sandbox, which still allows file
+    writes); the caller surfaces an honest note on stderr rather than dropping
+    or erroring on them.
     """
     unknown = [name for name in (*(names or ()), *exclude) if name not in PROVIDERS]
     if unknown:
@@ -533,12 +546,13 @@ def ask(
         note += f"; skipped (not installed): {', '.join(skipped)}"
     if exclude:
         note += f"; excluded: {', '.join(exclude)}"
-    # Providers with no read-only mode run unscoped in default mode; flag them so
-    # the user knows they aren't sandboxed (not relevant under --yolo).
+    # Providers whose default mode is only partial protection (e.g. agy's
+    # --sandbox still allows file writes) carry an honest note so the user knows
+    # what's actually guarded (not relevant under --yolo).
     if not yolo:
-        unscoped = [p.name for p in selected if p.readonly is None]
-        if unscoped:
-            note += f"; note: {', '.join(unscoped)} runs unsandboxed (no read-only mode)"
+        for p in selected:
+            if p.readonly_note:
+                note += f"; note: {p.readonly_note}"
     _note(note)
 
     results = asyncio.run(_collect(selected, prompt_text, timeout, json_output, models, yolo))
@@ -599,7 +613,9 @@ def doctor() -> None:
             provider = PROVIDERS[name]
             model = provider.default_model or "configured default"
             label = f"{name} ({model})"
-            if provider.readonly is None:
+            if provider.readonly_note:
+                label += " [partial sandbox - shell only; can still edit files]"
+            elif provider.readonly is None:
                 label += " [no read-only mode (runs unsandboxed)]"
             parts.append(label)
         return ", ".join(parts) or "none"
