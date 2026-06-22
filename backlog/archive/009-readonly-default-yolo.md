@@ -1,7 +1,7 @@
 # 009 - Read-only by default + `--yolo` override (0.1.1 patch)
 
-**Status:** ready (flags verified; agy policy decided)
-**Target:** 0.1.1 patch - fixes a safety gap shipped in 0.1.0.
+**Status:** done (folded into the 0.2.0 release; never tagged separately as 0.1.1).
+**Target:** was a 0.1.1 patch - fixes a safety gap shipped in 0.1.0.
 **Touches:** `src/moa_cli/cli.py` (Provider permission map, runner, `--yolo` flag, selection, doctor), `tests/test_moa.py`, `README.md`
 
 ## Context

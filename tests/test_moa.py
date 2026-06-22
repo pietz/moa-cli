@@ -1188,3 +1188,52 @@ def test_config_synthesizer_default_in_distill(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 0
     # synthesizer=codex from config -> codex distills (not the auto default claude).
     assert "## synthesis · via codex" in result.stdout
+
+
+def test_flag_equal_to_default_still_beats_config(monkeypatch, tmp_path) -> None:
+    # The Typer trap: an explicit flag whose value equals the built-in default
+    # must still override the config. Options default to None when omitted, so
+    # `--timeout 180` (==default 180) is distinguishable from "omitted" and wins.
+    _install_all(monkeypatch)
+    _config_env(monkeypatch, tmp_path)
+    (tmp_path / "config.toml").write_text("timeout = 120\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A")))
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["ask", "-n", "1", "--timeout", "180", "hi"])
+    assert result.exit_code == 0
+    # The explicit 180 wins; config's 120 must not leak into the run.
+    assert "timeout 180s" in result.stderr
+    assert "timeout 120s" not in result.stderr
+
+
+def test_malformed_config_fails_cleanly_but_path_survives(monkeypatch, tmp_path) -> None:
+    # A broken file must not crash with a traceback. `config path` never loads,
+    # so it still works; commands/verbs that read it fail cleanly via a handled
+    # BadParameter (SystemExit), not an unhandled TOMLDecodeError escaping.
+    _install_all(monkeypatch)
+    cfg_file = _config_env(monkeypatch, tmp_path)
+    cfg_file.write_text("this is not valid toml\n", encoding="utf-8")
+    runner = CliRunner()
+
+    # `path` never loads the file, so a broken file can't break it.
+    path_result = runner.invoke(cli.app, ["config", "path"])
+    assert path_result.exit_code == 0
+    assert str(cfg_file) in path_result.stdout
+
+    # `show` and the verbs read the file but fail cleanly (handled SystemExit
+    # from BadParameter), never letting the TOMLDecodeError surface raw.
+    for args in (["config", "show"], ["ask", "hi"]):
+        result = runner.invoke(cli.app, args)
+        assert result.exit_code != 0
+        assert isinstance(result.exception, SystemExit)
+
+
+def test_config_show_rejects_out_of_range_value(monkeypatch, tmp_path) -> None:
+    # A hand-edited but out-of-range value (num=0) must fail cleanly through the
+    # `show` command path, not print the invalid value as if it were usable.
+    cfg_file = _config_env(monkeypatch, tmp_path)
+    cfg_file.write_text("num = 0\n", encoding="utf-8")
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["config", "show"])
+    assert result.exit_code != 0
+    assert isinstance(result.exception, SystemExit)

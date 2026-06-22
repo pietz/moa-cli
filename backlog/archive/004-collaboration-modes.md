@@ -1,7 +1,6 @@
 # 004 - Collaboration modes: ask / distill / debate (verbs)
 
-**Status:** ready - GREENLIT for 0.2.0 (build all three verbs). Sequenced AFTER 009:
-004 rewrites the provider layer that 009 hardens, so 009 (0.1.1) ships first.
+**Status:** done (shipped in 0.2.0; all three verbs on main).
 **Touches:** `src/moa_cli/cli.py` (subcommand split + orchestration), `tests/test_moa.py`, `README.md`
 **Research:** Opus literature review complete - findings + citations folded in below.
 

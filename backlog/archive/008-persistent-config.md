@@ -1,6 +1,6 @@
 # 008 - Persistent config / default settings
 
-**Status:** building (on a side branch; integrate into 0.2.0 after 004)
+**Status:** done (shipped in 0.2.0; integrated on main, fresh-eyes review passed)
 **Touches:** `src/moa_cli/cli.py` (config load + merge into option defaults, new
 `moa config` command), `tests/test_moa.py`, `README.md`
 **Supersedes:** the deferred "config file" question in item 005 (model overrides).
