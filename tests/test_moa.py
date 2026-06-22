@@ -1,5 +1,6 @@
 import asyncio
 import random
+import re
 
 import pytest
 from typer.testing import CliRunner
@@ -460,31 +461,43 @@ def test_subcommands_registered() -> None:
         assert verb in result.stdout
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _help(args: list[str]) -> str:
+    """Invoke `--help` and return the ANSI-stripped stdout.
+
+    Rich colours each dash of an option separately (e.g. `-` then `-num`), so a
+    coloured terminal - which CI is, but a captured local run often isn't -
+    breaks a naive `"--num" in stdout`. Strip the escapes so the assertions hold
+    regardless of whether colour is on."""
+    result = CliRunner().invoke(cli.app, [*args, "--help"])
+    assert result.exit_code == 0
+    return _ANSI.sub("", result.stdout)
+
+
+_SHARED_OPTS = ("--num", "--provider", "--exclude", "--model", "--timeout", "--file", "--json", "--yolo")
+
+
 def test_ask_has_no_synth_flags() -> None:
     # --synth and --synthesizer were removed from ask; verbs replace them.
-    runner = CliRunner()
-    result = runner.invoke(cli.app, ["ask", "--help"])
-    assert result.exit_code == 0
-    assert "--synth" not in result.stdout
-    assert "--synthesizer" not in result.stdout
+    out = _help(["ask"])
+    assert "--synth" not in out
+    assert "--synthesizer" not in out
 
 
 def test_ask_help_shows_shared_options() -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli.app, ["ask", "--help"])
-    assert result.exit_code == 0
-    for opt in ("--num", "--provider", "--exclude", "--model", "--timeout", "--file", "--json", "--yolo"):
-        assert opt in result.stdout
+    out = _help(["ask"])
+    for opt in _SHARED_OPTS:
+        assert opt in out
 
 
 def test_distill_help_shows_shared_options_and_synthesizer() -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli.app, ["distill", "--help"])
-    assert result.exit_code == 0
-    for opt in ("--num", "--provider", "--exclude", "--model", "--timeout", "--file", "--json", "--yolo"):
-        assert opt in result.stdout
+    out = _help(["distill"])
+    for opt in _SHARED_OPTS:
+        assert opt in out
     # --synthesizer lives only on distill.
-    assert "--synthesizer" in result.stdout
+    assert "--synthesizer" in out
 
 
 def test_ask_is_council_no_synthesis(monkeypatch) -> None:
@@ -697,14 +710,12 @@ def test_clamp_rounds_below_one_warns() -> None:
 
 
 def test_debate_help_shows_rounds_judge_and_shared_options() -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli.app, ["debate", "--help"])
-    assert result.exit_code == 0
-    for opt in ("--num", "--provider", "--exclude", "--model", "--timeout", "--file", "--json", "--yolo"):
-        assert opt in result.stdout
+    out = _help(["debate"])
+    for opt in _SHARED_OPTS:
+        assert opt in out
     # Verb-specific options live only on debate.
-    assert "--rounds" in result.stdout
-    assert "--judge" in result.stdout
+    assert "--rounds" in out
+    assert "--judge" in out
 
 
 def test_debate_runs_rounds_then_judge(monkeypatch) -> None:
