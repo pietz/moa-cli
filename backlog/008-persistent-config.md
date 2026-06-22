@@ -1,6 +1,6 @@
 # 008 - Persistent config / default settings
 
-**Status:** proposed
+**Status:** building (on a side branch; integrate into 0.2.0 after 004)
 **Touches:** `src/moa_cli/cli.py` (config load + merge into option defaults, new
 `moa config` command), `tests/test_moa.py`, `README.md`
 **Supersedes:** the deferred "config file" question in item 005 (model overrides).
@@ -21,7 +21,9 @@ omitted. Absent config == today's built-in behavior.
 
 ## Location & format
 
-- `~/.config/moa/config.toml` (respect `$XDG_CONFIG_HOME`; create dir/file on first `set`).
+- `~/.moa/config.toml` (create dir/file on first `set`). A `~/.moa/` home dir matches
+  the sibling AI CLIs (`~/.claude`, `~/.codex`) and leaves room for future files.
+  Resolve the dir via a helper that honors `$MOA_CONFIG_DIR` if set, so tests use a temp dir.
 - TOML. Read with stdlib `tomllib` (3.11+, no dependency). Writes via a small
   purpose-built serializer for our flat schema (zero new deps) - or `tomli-w` if preferred.
 

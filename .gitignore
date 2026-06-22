@@ -12,3 +12,6 @@ wheels/
 # Secrets / local env (never commit)
 .env
 .env.*
+
+# Agent worktrees
+.claude/worktrees/
