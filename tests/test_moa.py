@@ -9,8 +9,10 @@ from moa_cli.cli import (
     PROVIDERS,
     Provider,
     RunResult,
+    assign_debate_roles,
     build_synthesis_prompt,
     choose_synthesizer,
+    clamp_rounds,
     parse_model_overrides,
     render_block,
     render_synthesis_block,
@@ -439,10 +441,8 @@ def test_subcommands_registered() -> None:
     runner = CliRunner()
     result = runner.invoke(cli.app, ["--help"])
     assert result.exit_code == 0
-    for verb in ("ask", "distill", "doctor"):
+    for verb in ("ask", "distill", "debate", "doctor"):
         assert verb in result.stdout
-    # Stage 2 lands debate; it must not be wired up yet.
-    assert "debate" not in result.stdout
 
 
 def test_ask_has_no_synth_flags() -> None:
@@ -609,3 +609,241 @@ def test_synthesizer_prompt_keeps_load_bearing_clauses() -> None:
     # Adapted away from "open-source models".
     assert "AI coding assistants" in text
     assert "open-source" not in text
+
+
+# --- debate: roles ----------------------------------------------------------
+
+
+def _provs(*names: str) -> list[Provider]:
+    return [PROVIDERS[n] for n in names]
+
+
+def test_debate_default_roles_two_debaters_one_judge() -> None:
+    # n=3 default: top 2 selected debate, the 3rd judges.
+    debaters, judge = assign_debate_roles(_provs("claude", "codex", "agy"), judge=None)
+    assert [p.name for p in debaters] == ["claude", "codex"]
+    assert judge.name == "agy"
+
+
+def test_debate_judge_override_excludes_judge_from_debaters() -> None:
+    # -j pins the judge; it must not also debate.
+    debaters, judge = assign_debate_roles(_provs("claude", "codex", "agy"), judge="claude")
+    assert judge.name == "claude"
+    assert "claude" not in [p.name for p in debaters]
+    assert [p.name for p in debaters] == ["codex", "agy"]
+
+
+def test_debate_judge_must_not_be_a_debater_distinct() -> None:
+    # The judge is always distinct from every debater (default and override).
+    debaters, judge = assign_debate_roles(_provs("claude", "codex", "agy", "opencode"), judge="codex")
+    assert judge.name not in [p.name for p in debaters]
+
+
+def test_debate_too_few_providers_errors() -> None:
+    # Fewer than 3 providers cannot give 2 debaters + 1 distinct judge.
+    with pytest.raises(ValueError):
+        assign_debate_roles(_provs("claude", "codex"), judge=None)
+
+
+def test_debate_judge_override_needs_two_other_debaters() -> None:
+    # With -j claude and only one other provider there aren't 2 debaters.
+    with pytest.raises(ValueError):
+        assign_debate_roles(_provs("claude", "codex"), judge="claude")
+
+
+def test_debate_judge_must_be_selected() -> None:
+    # A judge that isn't among the selected providers is an error, not a silent add.
+    with pytest.raises(ValueError):
+        assign_debate_roles(_provs("claude", "codex", "agy"), judge="opencode")
+
+
+# --- debate: rounds clamp ---------------------------------------------------
+
+
+def test_clamp_rounds_in_range() -> None:
+    assert clamp_rounds(2) == (2, None)
+    assert clamp_rounds(1)[0] == 1
+    assert clamp_rounds(4)[0] == 4
+
+
+def test_clamp_rounds_over_cap_warns() -> None:
+    rounds, warning = clamp_rounds(9)
+    assert rounds == 4
+    assert warning is not None and "capped" in warning
+
+
+def test_clamp_rounds_below_one_warns() -> None:
+    rounds, warning = clamp_rounds(0)
+    assert rounds == 1
+    assert warning is not None
+
+
+# --- debate: orchestration & safety -----------------------------------------
+
+
+def test_debate_help_shows_rounds_judge_and_shared_options() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["debate", "--help"])
+    assert result.exit_code == 0
+    for opt in ("--num", "--provider", "--exclude", "--model", "--timeout", "--file", "--json", "--yolo"):
+        assert opt in result.stdout
+    # Verb-specific options live only on debate.
+    assert "--rounds" in result.stdout
+    assert "--judge" in result.stdout
+
+
+def test_debate_runs_rounds_then_judge(monkeypatch) -> None:
+    # Debaters run sequentially across rounds, then the judge writes the verdict last.
+    _install_all(monkeypatch)
+    calls: list[str] = []
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        calls.append(provider.name)
+        return _ok(provider.name, f"{provider.name} answer")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "-r", "2", "hi"]
+    )
+    assert result.exit_code == 0
+    # 2 debaters (claude, codex) x 2 rounds + 1 judge (agy) = 5 calls.
+    assert calls == ["claude", "codex", "claude", "codex", "agy"]
+    assert "## round 1 · claude" in result.stdout
+    assert "## round 2 · codex" in result.stdout
+    assert "## verdict · judge agy" in result.stdout
+    # The verdict comes last.
+    assert result.stdout.index("verdict") > result.stdout.index("round 2")
+
+
+def test_debate_debaters_and_judge_read_only_by_default(monkeypatch) -> None:
+    # Default mode: every debater turn AND the judge run read-only (yolo=False).
+    _install_all(monkeypatch)
+    yolos: list[bool] = []
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        yolos.append(yolo)
+        return _ok(provider.name, "answer")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "hi"]
+    )
+    assert result.exit_code == 0
+    assert yolos and all(y is False for y in yolos)
+
+
+class _FakeProc:
+    """Minimal stand-in for asyncio.subprocess.Process that returns a fixed answer."""
+
+    returncode = 0
+    pid = 0
+
+    async def communicate(self):
+        return (b"ok answer", b"")
+
+
+def test_debate_inherits_readonly_argv(monkeypatch) -> None:
+    # End-to-end through the real run_provider: every spawned debater AND the
+    # judge argv must carry the read-only permission flags by default (no bypass).
+    _install_all(monkeypatch)
+    argvs: list[list[str]] = []
+
+    async def fake_exec(*args, **kwargs):
+        argvs.append(list(args))
+        return _FakeProc()
+
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "-r", "1", "hi"]
+    )
+    assert result.exit_code == 0
+    # claude (debater) carries read-only flags.
+    claude_argvs = [a for a in argvs if a and a[0] == "claude"]
+    assert claude_argvs and all("--permission-mode" in a and a[a.index("--permission-mode") + 1] == "plan" for a in claude_argvs)
+    # codex (debater) carries read-only flags.
+    codex_argvs = [a for a in argvs if a and a[0] == "codex"]
+    assert codex_argvs and all("read-only" in a for a in codex_argvs)
+    # The judge (agy) ran read-only too: its argv has --sandbox, not full access.
+    agy_argvs = [a for a in argvs if a and a[0] == "agy"]
+    assert agy_argvs and all("--sandbox" in a for a in agy_argvs)
+
+
+def test_debate_yolo_propagates(monkeypatch) -> None:
+    # --yolo flows to every debater and the judge.
+    _install_all(monkeypatch)
+    yolos: list[bool] = []
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        yolos.append(yolo)
+        return _ok(provider.name, "answer")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "--yolo", "hi"]
+    )
+    assert result.exit_code == 0
+    assert yolos and all(y is True for y in yolos)
+
+
+def test_debate_round_cap_clamped_in_run(monkeypatch) -> None:
+    # -r above the hard cap is clamped (with a warning) before the loop runs.
+    _install_all(monkeypatch)
+    calls: list[str] = []
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        calls.append(provider.name)
+        return _ok(provider.name, "answer")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "-r", "9", "hi"]
+    )
+    assert result.exit_code == 0
+    assert "capped" in result.stderr
+    # 2 debaters x 4 (capped) rounds + 1 judge = 9 calls, not 19.
+    debater_calls = [c for c in calls if c in ("claude", "codex")]
+    assert len(debater_calls) == 8
+
+
+def test_debate_too_few_providers_exits(monkeypatch) -> None:
+    # Only 2 providers installed: no distinct judge, clean exit (no silent degrade).
+    installed = {"claude", "codex"}
+    monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        raise AssertionError("debate must not run with too few providers")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["debate", "-n", "3", "hi"])
+    assert result.exit_code == 1
+    assert "at least 3 providers" in result.stderr
+
+
+def test_debate_converges_early(monkeypatch) -> None:
+    # When both debaters signal "NO SUBSTANTIVE CHANGE" in round 2, the debate
+    # stops before round 3 even though -r 3 was requested.
+    _install_all(monkeypatch)
+    round_state = {"n": 0}
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        round_state["n"] += 1
+        # First 2 calls (round 1) are normal; from round 2 on, both concede.
+        if round_state["n"] <= 2:
+            return _ok(provider.name, "initial answer")
+        return _ok(provider.name, "NO SUBSTANTIVE CHANGE I agree.")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "-r", "3", "hi"]
+    )
+    assert result.exit_code == 0
+    assert "converged" in result.stderr
+    # 2 rounds x 2 debaters + 1 judge = 5 calls (round 3 never runs).
+    assert round_state["n"] == 5
