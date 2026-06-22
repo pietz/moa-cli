@@ -1,0 +1,26 @@
+[project]
+name = "moa-cli"
+version = "0.1.0"
+description = "Ask one question to multiple local AI coding CLIs in parallel and collect their answers."
+readme = "README.md"
+authors = [
+    { name = "Paul-Louis Pröve", email = "plp@workgenius.com" }
+]
+requires-python = ">=3.12"
+keywords = ["llm", "agents", "cli", "claude", "codex", "gemini", "peer-review"]
+dependencies = [
+    "typer>=0.25.0",
+]
+
+[project.scripts]
+moa = "moa_cli.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10.0,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.12",
+]
