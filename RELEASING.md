@@ -5,25 +5,25 @@
 - **CI** (`.github/workflows/ci.yml`) - runs on every push to `main` and every PR.
   Installs with `uv`, then `ruff check` + `pytest` on Python 3.12 and 3.13.
 - **Release** (`.github/workflows/release.yml`) - runs when a `v*` tag is pushed.
-  Builds the sdist + wheel with `uv build`, publishes to PyPI via **trusted
-  publishing** (OIDC, no API token), and creates a GitHub Release with the built
+  Builds the sdist + wheel with `uv build`, publishes to PyPI using the
+  `PYPI_API_TOKEN` repo secret, and creates a GitHub Release with the built
   artifacts and auto-generated notes.
 
 ## One-time PyPI setup (required before the first release)
 
-Trusted publishing means no API tokens stored in GitHub. Configure it once:
+Publishing uses a PyPI API token stored as a GitHub Actions secret.
 
-1. Claim the `moa-cli` name on PyPI (the name must be available).
-2. On PyPI -> the project -> Settings -> Publishing -> add a **trusted publisher**:
-   - Owner: `pietz`
-   - Repository: `moa-cli`
-   - Workflow filename: `release.yml`
-   - Environment: `release`
-3. In the GitHub repo: Settings -> Environments -> create an environment named
-   `release`.
+1. At https://pypi.org -> Account settings -> API tokens, create a token. For the
+   first upload of a brand-new project, scope it to **"Entire account"**
+   (project-scoped tokens only exist once the project does). Rotate to a
+   project-scoped token after the first release if you like.
+2. Store it as the repo secret `PYPI_API_TOKEN`:
+   ```bash
+   gh secret set PYPI_API_TOKEN   # paste the token when prompted
+   ```
 
-> Prefer an API token instead of OIDC? Drop the `id-token` permission and add a
-> `PYPI_API_TOKEN` repo secret plus a `password:` input on the publish step.
+The `moa-cli` name is claimed automatically by the first successful upload, as long
+as it is still available.
 
 ## Cutting a release
 
