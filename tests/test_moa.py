@@ -353,34 +353,42 @@ def test_build_synthesis_prompt_ignores_failed() -> None:
 # --- render -----------------------------------------------------------------
 
 
-def test_render_block_ok() -> None:
-    output = render_block(_ok("claude", "Claude says yes."))
-    # The label is centered inside a box-drawing rule, with blank lines around it.
-    assert "claude (m) · OK · 1.0s" in output
+def test_render_block_ok_terminal() -> None:
+    # In a terminal (plain=False): a centered box-drawing rule, no markdown heading.
+    output = render_block(_ok("claude", "Claude says yes."), plain=False)
     assert "─── claude (m) · OK · 1.0s ───" in output
     assert "## " not in output
     assert "Claude says yes." in output
 
 
+def test_render_block_ok_piped_is_plain() -> None:
+    # Piped (plain=True): a plain `## label` heading, no box-drawing noise.
+    output = render_block(_ok("claude", "Claude says yes."), plain=True)
+    assert "## claude (m) · OK · 1.0s" in output
+    assert "─" not in output
+    assert "Claude says yes." in output
+
+
 def test_render_block_omits_model_when_empty() -> None:
     result = RunResult("opencode", "", "ok", "Hi.", "", 2.0, 0)
-    assert "opencode · OK" in render_block(result)
+    assert "opencode · OK" in render_block(result, plain=True)
 
 
 def test_render_block_failure_detail() -> None:
     result = RunResult("agy", "g", "timeout", "", "Timed out after 1s.", 1.0, None)
-    output = render_block(result)
+    output = render_block(result, plain=True)
     assert "agy (g) · TIMEOUT" in output
     assert "Timed out after 1s." in output
 
 
 def test_render_block_blank_line_separation() -> None:
-    # Two leading blank lines front each block so streamed answers stay distinct.
-    assert render_block(_ok("claude", "hi")).startswith("\n\n─")
+    # Terminal: two leading blank lines + rule. Piped: one blank line + heading.
+    assert render_block(_ok("claude", "hi"), plain=False).startswith("\n\n─")
+    assert render_block(_ok("claude", "hi"), plain=True).startswith("\n## ")
 
 
 def test_render_synthesis_block_no_mode_tag() -> None:
-    output = render_synthesis_block(_ok("synthesis", "merged"), synthesizer="codex")
+    output = render_synthesis_block(_ok("synthesis", "merged"), synthesizer="codex", plain=True)
     assert "synthesis · via codex · OK" in output
     assert "(blind)" not in output and "(named)" not in output
 
@@ -511,8 +519,9 @@ def test_ask_is_council_no_synthesis(monkeypatch) -> None:
     assert "synthesis" not in result.stdout
 
 
-def test_distill_runs_council_then_merges(monkeypatch) -> None:
-    # distill streams the proposer answers, then a single merged block last.
+def test_distill_returns_only_the_merged_answer(monkeypatch) -> None:
+    # distill returns ONLY the distilled block; the individual proposer answers
+    # are intermediates and must not appear on stdout (they heartbeat to stderr).
     _install_all(monkeypatch)
     monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
 
@@ -523,11 +532,30 @@ def test_distill_runs_council_then_merges(monkeypatch) -> None:
     runner = CliRunner()
     result = runner.invoke(cli.app, ["distill", "-p", "claude", "-p", "codex", "hi"])
     assert result.exit_code == 0
-    assert "claude (m) ·" in result.stdout and "codex (m) ·" in result.stdout
+    # The merged block is present...
     assert "synthesis · via claude" in result.stdout
     assert "merged answer" in result.stdout
-    # The merged block comes after both proposer blocks.
-    assert result.stdout.index("synthesis") > result.stdout.index("codex (m) ·")
+    # ...and the proposer answer blocks are NOT on stdout.
+    assert "claude (m) ·" not in result.stdout
+    assert "codex (m) ·" not in result.stdout
+    # Proposers still heartbeat to stderr so the wait isn't silent.
+    assert "claude responded" in result.stderr and "codex responded" in result.stderr
+
+
+def test_distill_json_emits_only_synthesis(monkeypatch) -> None:
+    # distill --json returns only the synthesis record, never per-agent responses.
+    _install_all(monkeypatch)
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        return _ok("claude", "merged")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["distill", "-p", "claude", "-p", "codex", "--json", "hi"])
+    assert result.exit_code == 0
+    assert '"type": "synthesis"' in result.stdout
+    assert '"type": "response"' not in result.stdout
 
 
 def test_distill_aggregator_input_is_blind_and_shuffled(monkeypatch) -> None:

@@ -25,9 +25,36 @@ Or run it once without installing:
 uvx --from moa-cli moa ask "Review this plan."
 ```
 
+> **Requirements.** MOA drives agent CLIs you install separately - it ships no model
+> or API key of its own. You need at least two of `claude` (Claude Code), `codex`,
+> `agy` (Antigravity), and `opencode` on your `PATH` and logged in. Run **`moa doctor`**
+> first to see which ones MOA can find; with only one installed, the "council" collapses
+> to a single answer.
+
 ## Why
 
 A single model gives you one perspective. Asking three frontier models the same question - and seeing where they agree, diverge, or contradict - is a fast, cheap way to pressure-test an answer. MOA makes that a one-liner using the CLIs you already pay for, with no API keys of its own.
+
+### Example
+
+```text
+$ moa ask "Is Postgres or SQLite better for a desktop app?"
+Asking claude, codex, agy (timeout 180s, read-only)
+
+──────────────── claude (opus) · OK · 3.2s ────────────────
+
+For a single-user desktop app, SQLite is almost always the right call:
+zero-config, serverless, the whole DB is one file you can ship... [trimmed]
+
+─────────────── codex (gpt-5.5) · OK · 4.1s ───────────────
+
+Use SQLite unless you expect concurrent writers or need network access.
+For a desktop app neither is likely, so SQLite wins on simplicity... [trimmed]
+```
+
+The selection note goes to stderr; the attributed answers go to stdout. In a terminal
+each answer gets the rule shown above; when piped or read by another agent, the same
+blocks render as plain `## ...` headings. Add `--json` for machine-readable JSONL.
 
 ## Usage
 
@@ -169,13 +196,13 @@ The synthesizer default is persistable too (e.g. `moa config set synthesizer cod
 
 ### Output
 
-- **stdout** carries only content: each agent's answer is fronted by a centered separator rule naming it (`──── claude (opus) · OK · 3.5s ────`) with blank lines around it for clear separation, flushed the instant that agent finishes. `moa distill` then appends the merged block (`──── synthesis · via claude · OK · ... ────`) once the aggregator finishes.
+- **stdout** carries only content. In a terminal, each agent's answer is fronted by a centered box-drawing rule naming it (`──── claude (opus) · OK · 3.5s ────`) with blank lines for separation, flushed the instant that agent finishes. When stdout is **piped or read by an agent** (not a TTY), the same block renders as a plain, low-noise `## claude (opus) · OK · 3.5s` heading instead - no box-drawing. `moa distill` emits only the final merged block.
 - **stderr** carries progress and selection notes (`Asking claude, codex ...`), so piping stdout stays clean.
-- `--json` emits one JSON object per line (JSONL): a `{"type": "response", ...}` record per agent as it completes; `distill` then adds a `{"type": "synthesis", ...}` record. `debate` instead emits a `{"type": "debate_turn", "round": N, ...}` record per turn plus a final `{"type": "verdict", ...}` record. Ideal when another agent calls MOA and parses the result.
+- `--json` emits one JSON object per line (JSONL): `ask` writes a `{"type": "response", ...}` record per agent as it completes; `distill` writes a single `{"type": "synthesis", ...}` record (only the merged answer); `debate` writes a `{"type": "debate_turn", "round": N, ...}` record per turn plus a final `{"type": "verdict", ...}` record. Ideal when another agent calls MOA and parses the result.
 
 ### `moa distill` (synthesis)
 
-`distill` runs the same council fan-out as `ask`, then one more pass where a strong aggregator merges the collected answers into a single, unified answer. It needs at least two successful proposer answers; with fewer it streams what it has and skips the merge. The aggregator is chosen with `-s/--synthesizer`:
+`distill` runs the same council fan-out as `ask`, then one more pass where a strong aggregator merges the collected answers into a single, unified answer. **It returns only that merged answer** - the individual proposer responses are intermediates and are not printed (each one's arrival is noted on stderr so the wait isn't silent). It needs at least two successful proposer answers; with fewer it skips the merge and says so on stderr. The aggregator is chosen with `-s/--synthesizer`:
 
 - `auto` (default) - the highest-priority agent that ran (deterministic)
 - `random` - pick one of the agents that ran, at random
@@ -193,7 +220,7 @@ The aggregator prompt is adapted from the Mixture-of-Agents "Aggregate-and-Synth
 
 **The loop.** Round 1: debater A answers cold; debater B sees A's answer with an adversarial-stance instruction ("identify errors/weaknesses before giving your own answer; do not agree merely to reach consensus"). Each later round, every debater sees the other's latest answer and responds in the same spirit. If every debater signals it has *no substantive change* (it may open its reply with `NO SUBSTANTIVE CHANGE`), the debate stops early before the cap.
 
-**The judge.** A model that is **not** a debater reads the full transcript - presented **anonymized and order-shuffled** (a model is judging, so brand/position bias is killed, per item 002) - and writes the final answer. Its prompt instructs it to weigh correctness and evidence **above** confidence and fluency. The judge's verdict is the final block (`──── verdict · judge <name> · ... ────`).
+**The judge.** A model that is **not** a debater reads the full transcript - presented **anonymized and order-shuffled** (a model is judging, so brand/position bias is killed) - and writes the final answer. Its prompt instructs it to weigh correctness and evidence **above** confidence and fluency. The judge's verdict is the final block (`──── verdict · judge <name> · ... ────`).
 
 **Streaming/output.** Each debater's turn streams as it completes (`──── round N · <provider> · ... ────`), then the judge's verdict last. `--json` emits a `{"type": "debate_turn", "round": N, ...}` record per turn plus a final `{"type": "verdict", ...}` record.
 
@@ -219,6 +246,13 @@ Invocations below show the default (read-only) flags; `--yolo` swaps in each too
 | `opencode`  | `opencode` | `opencode run --agent plan PROMPT`                                  |
 
 Adding a new agent is a single entry in the `PROVIDERS` table in `src/moa_cli/cli.py` (executable, default model, command builder, permission flags); it then participates in detection, `-n` selection, and `distill` automatically.
+
+## Agent skill
+
+If you drive MOA from an agent (e.g. Claude Code), there's a ready-made skill at
+[`skills/moa/SKILL.md`](skills/moa/SKILL.md): it tells an agent when to reach for MOA and
+how to use it (verb choice, self-exclusion via `-x <self>`, parsing the JSONL output). It
+supersedes hand-rolling a "peer review" skill.
 
 ## Development
 

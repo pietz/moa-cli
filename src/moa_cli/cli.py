@@ -560,21 +560,36 @@ def _body(result: RunResult) -> list[str]:
     return ["```text", detail[-1200:], "```", ""]
 
 
-def _render(label: str, result: RunResult) -> str:
-    """A block: two leading blank lines, the named rule, a blank line, the body.
-    The leading blanks give each answer clear breathing room as blocks stream."""
+def _plain_output() -> bool:
+    """True when stdout is not an interactive terminal - piped, redirected, or
+    read by another agent (the common "an agent shells out to moa" case). There
+    we drop the decorative box-drawing rule and extra blank lines for a plain,
+    low-noise `## label` heading that is cheaper for a model to consume."""
+    return not sys.stdout.isatty()
+
+
+def _render(label: str, result: RunResult, plain: bool) -> str:
+    """One answer block. In a terminal: two leading blank lines and a centered
+    box-drawing rule, for clear visual separation as blocks stream in. When
+    piped: a plain `## label` heading with a single blank line, no box-drawing."""
+    if plain:
+        return "\n".join(["", f"## {label}", "", *_body(result)])
     return "\n".join(["", "", _rule(label), "", *_body(result)])
 
 
-def render_block(result: RunResult) -> str:
+def render_block(result: RunResult, plain: bool | None = None) -> str:
+    if plain is None:
+        plain = _plain_output()
     model = f" ({result.model})" if result.model else ""
     label = f"{result.provider}{model} · {_status_label(result.status)} · {result.elapsed:.1f}s"
-    return _render(label, result)
+    return _render(label, result, plain)
 
 
-def render_synthesis_block(result: RunResult, synthesizer: str) -> str:
+def render_synthesis_block(result: RunResult, synthesizer: str, plain: bool | None = None) -> str:
+    if plain is None:
+        plain = _plain_output()
     label = f"synthesis · via {synthesizer} · {_status_label(result.status)} · {result.elapsed:.1f}s"
-    return _render(label, result)
+    return _render(label, result, plain)
 
 
 def result_record(result: RunResult) -> dict:
@@ -601,18 +616,22 @@ def synthesis_record(result: RunResult, synthesizer: str) -> dict:
     }
 
 
-def render_debate_turn_block(result: RunResult, round_num: int) -> str:
+def render_debate_turn_block(result: RunResult, round_num: int, plain: bool | None = None) -> str:
+    if plain is None:
+        plain = _plain_output()
     model = f" ({result.model})" if result.model else ""
     label = (
         f"round {round_num} · {result.provider}{model} · "
         f"{_status_label(result.status)} · {result.elapsed:.1f}s"
     )
-    return _render(label, result)
+    return _render(label, result, plain)
 
 
-def render_judge_block(result: RunResult, judge: str) -> str:
+def render_judge_block(result: RunResult, judge: str, plain: bool | None = None) -> str:
+    if plain is None:
+        plain = _plain_output()
     label = f"verdict · judge {judge} · {_status_label(result.status)} · {result.elapsed:.1f}s"
-    return _render(label, result)
+    return _render(label, result, plain)
 
 
 def debate_turn_record(result: RunResult, round_num: int) -> dict:
@@ -877,11 +896,20 @@ async def _collect(
     json_output: bool,
     models: dict[str, str] | None = None,
     yolo: bool = False,
+    emit_blocks: bool = True,
 ) -> list[RunResult]:
+    """Gather every agent's result. With emit_blocks (ask), each complete answer
+    is flushed to stdout the instant it arrives. Without it (distill), the
+    individual answers are intermediates the user shouldn't see - only the final
+    distilled block is content - so we keep stdout clean and just heartbeat each
+    arrival to stderr so a multi-agent run doesn't look frozen while it waits."""
     results: list[RunResult] = []
     async for result in stream(providers, prompt, timeout, models, yolo):
         results.append(result)
-        _emit(json.dumps(result_record(result)) if json_output else render_block(result))
+        if emit_blocks:
+            _emit(json.dumps(result_record(result)) if json_output else render_block(result))
+        else:
+            _note(f"  {result.provider} responded ({_status_label(result.status)}, {result.elapsed:.1f}s)")
     return results
 
 
@@ -1051,8 +1079,13 @@ def distill(
     # it merges through the same precedence: CLI flag > config file > built-in.
     synthesizer = resolve_option(synthesizer, "synthesizer", _read_config_or_empty(), "auto")
 
+    # distill returns only the merged answer, so the proposer responses are
+    # intermediates: collect them without printing each to stdout.
     results = asyncio.run(
-        _collect(cfg.selected, cfg.prompt, cfg.timeout, cfg.json_output, cfg.models, cfg.yolo)
+        _collect(
+            cfg.selected, cfg.prompt, cfg.timeout, cfg.json_output, cfg.models, cfg.yolo,
+            emit_blocks=False,
+        )
     )
     successes = [r for r in results if r.status == "ok"]
 
