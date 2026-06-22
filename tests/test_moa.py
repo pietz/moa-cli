@@ -11,9 +11,10 @@ from moa_cli.cli import (
     Provider,
     RunResult,
     assign_debate_roles,
+    build_convergence_prompt,
     build_debate_turn_prompt,
-    build_judge_prompt,
     build_synthesis_prompt,
+    build_verdict_prompt,
     choose_synthesizer,
     clamp_rounds,
     load_config,
@@ -24,9 +25,6 @@ from moa_cli.cli import (
     run_provider,
     select_for_run,
     serialize_config,
-)
-from moa_cli.cli import (
-    _signals_convergence as signals_convergence,
 )
 
 
@@ -674,43 +672,37 @@ def _provs(*names: str) -> list[Provider]:
     return [PROVIDERS[n] for n in names]
 
 
-def test_debate_default_roles_two_debaters_one_judge() -> None:
-    # n=3 default: top 2 selected debate, the 3rd judges.
-    debaters, judge = assign_debate_roles(_provs("claude", "codex", "agy"), judge=None)
+def test_debate_default_roles_two_debaters_moderator_first() -> None:
+    # Default: top 2 selected debate; the moderator is the first (top-priority)
+    # selected provider - which is also one of the debaters.
+    for moderator in (None, "auto"):
+        debaters, mod = assign_debate_roles(_provs("claude", "codex", "agy"), moderator)
+        assert [p.name for p in debaters] == ["claude", "codex"]
+        assert mod.name == "claude"
+        assert mod.name in [p.name for p in debaters]  # the moderator may debate
+
+
+def test_debate_moderator_pinned_to_nondebater() -> None:
+    # Pin a 3rd selected agent as moderator for a neutral (non-debating) overseer.
+    debaters, mod = assign_debate_roles(_provs("claude", "codex", "agy"), "agy")
     assert [p.name for p in debaters] == ["claude", "codex"]
-    assert judge.name == "agy"
+    assert mod.name == "agy"
+    assert mod.name not in [p.name for p in debaters]
 
 
-def test_debate_judge_override_excludes_judge_from_debaters() -> None:
-    # -j pins the judge; it must not also debate.
-    debaters, judge = assign_debate_roles(_provs("claude", "codex", "agy"), judge="claude")
-    assert judge.name == "claude"
-    assert "claude" not in [p.name for p in debaters]
-    assert [p.name for p in debaters] == ["codex", "agy"]
-
-
-def test_debate_judge_must_not_be_a_debater_distinct() -> None:
-    # The judge is always distinct from every debater (default and override).
-    debaters, judge = assign_debate_roles(_provs("claude", "codex", "agy", "opencode"), judge="codex")
-    assert judge.name not in [p.name for p in debaters]
-
-
-def test_debate_too_few_providers_errors() -> None:
-    # Fewer than 3 providers cannot give 2 debaters + 1 distinct judge.
+def test_debate_needs_at_least_two_providers() -> None:
+    # Two is enough now (the moderator may also be a debater); one is not.
+    debaters, mod = assign_debate_roles(_provs("claude", "codex"), None)
+    assert [p.name for p in debaters] == ["claude", "codex"]
+    assert mod.name == "claude"
     with pytest.raises(ValueError):
-        assign_debate_roles(_provs("claude", "codex"), judge=None)
+        assign_debate_roles(_provs("claude"), None)
 
 
-def test_debate_judge_override_needs_two_other_debaters() -> None:
-    # With -j claude and only one other provider there aren't 2 debaters.
+def test_debate_moderator_must_be_selected() -> None:
+    # A moderator that isn't among the selected providers is an error, not a silent add.
     with pytest.raises(ValueError):
-        assign_debate_roles(_provs("claude", "codex"), judge="claude")
-
-
-def test_debate_judge_must_be_selected() -> None:
-    # A judge that isn't among the selected providers is an error, not a silent add.
-    with pytest.raises(ValueError):
-        assign_debate_roles(_provs("claude", "codex", "agy"), judge="opencode")
+        assign_debate_roles(_provs("claude", "codex", "agy"), "opencode")
 
 
 # --- debate: rounds clamp ---------------------------------------------------
@@ -737,41 +729,75 @@ def test_clamp_rounds_below_one_warns() -> None:
 # --- debate: orchestration & safety -----------------------------------------
 
 
-def test_debate_help_shows_rounds_judge_and_shared_options() -> None:
+def test_debate_help_shows_rounds_moderator_and_shared_options() -> None:
     out = _help(["debate"])
     for opt in _SHARED_OPTS:
         assert opt in out
     # Verb-specific options live only on debate.
     assert "--rounds" in out
-    assert "--judge" in out
+    assert "--moderator" in out
+    assert "--judge" not in out  # renamed
 
 
-def test_debate_runs_rounds_then_judge(monkeypatch) -> None:
-    # Debaters run sequentially across rounds, then the judge writes the verdict last.
+def test_debate_defaults_to_two_agents(monkeypatch) -> None:
+    # debate's built-in default selection is 2 (not the usual 3): it only needs
+    # two debaters, since the moderator may be one of them.
+    _install_all(monkeypatch)
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        return _ok(provider.name, "answer")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["debate", "-r", "1", "hi"])
+    assert result.exit_code == 0
+    assert "Asking claude, codex (" in result.stderr  # top 2 only, not agy/opencode
+
+
+def test_debate_runs_rounds_then_verdict(monkeypatch) -> None:
+    # Debaters run sequentially across rounds; a pinned neutral moderator (agy)
+    # checks convergence between rounds and writes the verdict last.
     _install_all(monkeypatch)
     calls: list[str] = []
 
     async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
         calls.append(provider.name)
+        if "Your decision" in prompt:  # moderator convergence check
+            return _ok(provider.name, "CONTINUE")
         return _ok(provider.name, f"{provider.name} answer")
 
     monkeypatch.setattr(cli, "run_provider", fake_run_provider)
     runner = CliRunner()
     result = runner.invoke(
-        cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "-r", "2", "hi"]
+        cli.app,
+        ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "--moderator", "agy", "-r", "2", "hi"],
     )
     assert result.exit_code == 0
-    # 2 debaters (claude, codex) x 2 rounds + 1 judge (agy) = 5 calls.
-    assert calls == ["claude", "codex", "claude", "codex", "agy"]
+    # 2 debaters x 2 rounds = 4 debater turns; agy moderates (1 check + 1 verdict).
+    assert [c for c in calls if c in ("claude", "codex")] == ["claude", "codex", "claude", "codex"]
     assert "round 1 · claude" in result.stdout
     assert "round 2 · codex" in result.stdout
-    assert "verdict · judge agy" in result.stdout
+    assert "verdict · moderator agy" in result.stdout
     # The verdict comes last.
     assert result.stdout.index("verdict") > result.stdout.index("round 2")
 
 
-def test_debate_debaters_and_judge_read_only_by_default(monkeypatch) -> None:
-    # Default mode: every debater turn AND the judge run read-only (yolo=False).
+def test_debate_default_moderator_is_a_debater(monkeypatch) -> None:
+    # With just 2 agents the default moderator is the first one (also a debater).
+    _install_all(monkeypatch)
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        return _ok(provider.name, "answer")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["debate", "-p", "claude", "-p", "codex", "-r", "1", "hi"])
+    assert result.exit_code == 0
+    assert "verdict · moderator claude" in result.stdout
+
+
+def test_debate_debaters_and_moderator_read_only_by_default(monkeypatch) -> None:
+    # Default mode: every debater turn AND the moderator run read-only (yolo=False).
     _install_all(monkeypatch)
     yolos: list[bool] = []
 
@@ -800,7 +826,7 @@ class _FakeProc:
 
 def test_debate_inherits_readonly_argv(monkeypatch) -> None:
     # End-to-end through the real run_provider: every spawned debater AND the
-    # judge argv must carry the read-only permission flags by default (no bypass).
+    # moderator argv must carry the read-only permission flags by default.
     _install_all(monkeypatch)
     argvs: list[list[str]] = []
 
@@ -811,7 +837,8 @@ def test_debate_inherits_readonly_argv(monkeypatch) -> None:
     monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
     runner = CliRunner()
     result = runner.invoke(
-        cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "-r", "1", "hi"]
+        cli.app,
+        ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "--moderator", "agy", "-r", "1", "hi"],
     )
     assert result.exit_code == 0
     # claude (debater) carries read-only flags.
@@ -820,13 +847,13 @@ def test_debate_inherits_readonly_argv(monkeypatch) -> None:
     # codex (debater) carries read-only flags.
     codex_argvs = [a for a in argvs if a and a[0] == "codex"]
     assert codex_argvs and all("read-only" in a for a in codex_argvs)
-    # The judge (agy) ran read-only too: its argv has --sandbox, not full access.
+    # The moderator (agy) ran read-only too: its argv has --sandbox, not full access.
     agy_argvs = [a for a in argvs if a and a[0] == "agy"]
     assert agy_argvs and all("--sandbox" in a for a in agy_argvs)
 
 
 def test_debate_yolo_propagates(monkeypatch) -> None:
-    # --yolo flows to every debater and the judge.
+    # --yolo flows to every debater and the moderator.
     _install_all(monkeypatch)
     yolos: list[bool] = []
 
@@ -850,23 +877,26 @@ def test_debate_round_cap_clamped_in_run(monkeypatch) -> None:
 
     async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
         calls.append(provider.name)
+        if "Your decision" in prompt:  # moderator: never converge, run all rounds
+            return _ok(provider.name, "CONTINUE")
         return _ok(provider.name, "answer")
 
     monkeypatch.setattr(cli, "run_provider", fake_run_provider)
     runner = CliRunner()
     result = runner.invoke(
-        cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "-r", "9", "hi"]
+        cli.app,
+        ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "--moderator", "agy", "-r", "9", "hi"],
     )
     assert result.exit_code == 0
     assert "capped" in result.stderr
-    # 2 debaters x 4 (capped) rounds + 1 judge = 9 calls, not 19.
+    # 2 debaters x 4 (capped) rounds = 8 debater turns, not 18.
     debater_calls = [c for c in calls if c in ("claude", "codex")]
     assert len(debater_calls) == 8
 
 
 def test_debate_too_few_providers_exits(monkeypatch) -> None:
-    # Only 2 providers installed: no distinct judge, clean exit (no silent degrade).
-    installed = {"claude", "codex"}
+    # Only 1 provider installed: can't field 2 debaters, clean exit (no silent degrade).
+    installed = {"claude"}
     monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
 
     async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
@@ -876,46 +906,47 @@ def test_debate_too_few_providers_exits(monkeypatch) -> None:
     runner = CliRunner()
     result = runner.invoke(cli.app, ["debate", "-n", "3", "hi"])
     assert result.exit_code == 1
-    assert "at least 3 providers" in result.stderr
+    assert "at least 2 providers" in result.stderr
 
 
-def test_debate_converges_early(monkeypatch) -> None:
-    # When both debaters signal "NO SUBSTANTIVE CHANGE" in round 2, the debate
-    # stops before round 3 even though -r 3 was requested.
+def test_debate_moderator_converges_early(monkeypatch) -> None:
+    # When the moderator replies DONE after a round, the debate stops before the
+    # cap even though -r 3 was requested.
     _install_all(monkeypatch)
-    round_state = {"n": 0}
+    calls: list[str] = []
 
     async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
-        round_state["n"] += 1
-        # First 2 calls (round 1) are normal; from round 2 on, both concede.
-        if round_state["n"] <= 2:
-            return _ok(provider.name, "initial answer")
-        return _ok(provider.name, "NO SUBSTANTIVE CHANGE I agree.")
+        calls.append(provider.name)
+        if "Your decision" in prompt:  # moderator converges immediately
+            return _ok(provider.name, "DONE")
+        return _ok(provider.name, "answer")
 
     monkeypatch.setattr(cli, "run_provider", fake_run_provider)
     runner = CliRunner()
     result = runner.invoke(
-        cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "-r", "3", "hi"]
+        cli.app,
+        ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "--moderator", "agy", "-r", "3", "hi"],
     )
     assert result.exit_code == 0
     assert "converged" in result.stderr
-    # 2 rounds x 2 debaters + 1 judge = 5 calls (round 3 never runs).
-    assert round_state["n"] == 5
+    # Round 1 (claude, codex) only; the moderator stops it, so rounds 2-3 never run.
+    assert [c for c in calls if c in ("claude", "codex")] == ["claude", "codex"]
+    assert "verdict · moderator agy" in result.stdout
 
 
-# --- debate: judge prompt is anonymized + shuffled (judge-blindness) --------
+# --- debate: verdict prompt is anonymized + shuffled (moderator-blindness) --
 
 
-def test_build_judge_prompt_anonymizes_transcript() -> None:
-    # The judge must never see provider/model attribution: the structure relabels
-    # each turn "Participant N" with no provider/model name attached, so a brand
-    # can't leak via the labels (guards judge-blindness from regression). Answer
-    # bodies are neutral here so the only place a name could appear is a label.
+def test_build_verdict_prompt_anonymizes_transcript() -> None:
+    # The moderator must never see provider/model attribution: the structure
+    # relabels each turn "Participant N" with no provider/model name attached, so a
+    # brand can't leak via the labels - this matters even when the moderator was a
+    # debater. Answer bodies are neutral here so a name could only appear in a label.
     transcript = [
         RunResult("claude", "opus", "ok", "The answer is four.", "", 1.0, 0),
         RunResult("codex", "gpt-5.5", "ok", "Four, after carrying the one.", "", 1.0, 0),
     ]
-    prompt, label_map = build_judge_prompt("Q?", transcript, rng=random.Random(0))
+    prompt, label_map = build_verdict_prompt("Q?", transcript, rng=random.Random(0))
     for brand in ("claude", "codex", "opus", "gpt-5.5"):
         assert brand not in prompt
     assert "Participant 1" in prompt and "Participant 2" in prompt
@@ -924,26 +955,26 @@ def test_build_judge_prompt_anonymizes_transcript() -> None:
     assert set(label_map) == {"Participant 1", "Participant 2"}
 
 
-def test_build_judge_prompt_shuffles_with_seeded_rng() -> None:
+def test_build_verdict_prompt_shuffles_with_seeded_rng() -> None:
     # Order is shuffled (a seeded RNG makes this deterministic to assert). With
     # this seed the two participants come out in reversed provider order.
     transcript = [
         RunResult("claude", "opus", "ok", "alpha", "", 1.0, 0),
         RunResult("codex", "gpt-5.5", "ok", "beta", "", 1.0, 0),
     ]
-    _, label_map = build_judge_prompt("Q?", transcript, rng=random.Random(1))
+    _, label_map = build_verdict_prompt("Q?", transcript, rng=random.Random(1))
     # Seed 1 reverses the pair, so Participant 1 is the second provider (codex).
     assert label_map["Participant 1"] == "codex"
     assert label_map["Participant 2"] == "claude"
 
 
-def test_build_judge_prompt_ignores_failed_turns() -> None:
-    # A failed/errored turn never reaches the judge transcript.
+def test_build_verdict_prompt_ignores_failed_turns() -> None:
+    # A failed/errored turn never reaches the moderator's verdict transcript.
     transcript = [
         RunResult("claude", "opus", "ok", "good answer", "", 1.0, 0),
         RunResult("codex", "gpt-5.5", "timeout", "", "boom", 1.0, None),
     ]
-    prompt, label_map = build_judge_prompt("Q?", transcript, rng=random.Random(0))
+    prompt, label_map = build_verdict_prompt("Q?", transcript, rng=random.Random(0))
     assert list(label_map) == ["Participant 1"]
     assert label_map == {"Participant 1": "claude"}
     assert "boom" not in prompt
@@ -969,44 +1000,46 @@ def test_build_debate_turn_prompt_later_turn_is_adversarial() -> None:
     assert "the other participant" in prompt
 
 
-# --- debate: convergence signal (round >= 2 only, never on failed turns) -----
+# --- debate: moderator convergence prompt -----------------------------------
 
 
-def test_signals_convergence_marker_detected() -> None:
-    # An OK turn opening with the marker (case-insensitive) signals convergence.
-    assert signals_convergence(_ok("claude", "NO SUBSTANTIVE CHANGE, I agree."))
-    assert signals_convergence(_ok("claude", "no substantive change - same as before"))
+def test_build_convergence_prompt_anonymizes_and_asks_for_decision() -> None:
+    # The convergence check shows the debaters' latest answers anonymized and asks
+    # for a one-word DONE/CONTINUE decision.
+    latest = [
+        RunResult("claude", "opus", "ok", "Alpha argument.", "", 1.0, 0),
+        RunResult("codex", "gpt-5.5", "ok", "Beta argument.", "", 1.0, 0),
+    ]
+    prompt = build_convergence_prompt("Q?", latest)
+    for brand in ("claude", "codex", "opus", "gpt-5.5"):
+        assert brand not in prompt
+    assert "Participant 1" in prompt and "Participant 2" in prompt
+    assert "Alpha argument." in prompt and "Beta argument." in prompt
+    assert "DONE" in prompt and "CONTINUE" in prompt
 
 
-def test_signals_convergence_ignores_failed_turn() -> None:
-    # A failed/errored turn never counts as convergence even if its text matches.
-    failed = RunResult("claude", "opus", "timeout", "NO SUBSTANTIVE CHANGE", "boom", 1.0, None)
-    assert not signals_convergence(failed)
-    assert not signals_convergence(_ok("claude", "Here is a brand new argument."))
-
-
-def test_debate_round1_marker_does_not_stop_debate(monkeypatch) -> None:
-    # A round-1 convergence marker must NOT end the debate: early-stop is only
-    # meaningful from round 2 onward (round 1 always has a cold answer).
+def test_debate_moderator_continue_runs_all_rounds(monkeypatch) -> None:
+    # When the moderator keeps replying CONTINUE, the debate runs the full cap and
+    # the moderator is consulted after each non-final round.
     _install_all(monkeypatch)
-    round_state = {"n": 0}
+    checks = {"n": 0}
 
     async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
-        round_state["n"] += 1
-        # Every debater turn opens with the marker, including round 1.
-        return _ok(provider.name, "NO SUBSTANTIVE CHANGE I have nothing to add.")
+        if "Your decision" in prompt:
+            checks["n"] += 1
+            return _ok(provider.name, "CONTINUE")
+        return _ok(provider.name, "answer")
 
     monkeypatch.setattr(cli, "run_provider", fake_run_provider)
     runner = CliRunner()
     result = runner.invoke(
-        cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "-r", "2", "hi"]
+        cli.app,
+        ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "--moderator", "agy", "-r", "3", "hi"],
     )
     assert result.exit_code == 0
-    # Round 1 markers are ignored; round 2 markers then converge and stop after 2
-    # rounds. 2 debaters x 2 rounds + 1 judge = 5 calls (round 1 did NOT stop it).
-    assert round_state["n"] == 5
-    # The debate only reports convergence at round 2, never round 1.
-    assert "converged after round 2" in result.stderr
+    # 3 rounds -> a check after rounds 1 and 2 (never after the final round 3).
+    assert checks["n"] == 2
+    assert "converged" not in result.stderr
 
 
 # --- config: location, precedence, set/unset round-trip ---------------------
@@ -1087,6 +1120,18 @@ def test_config_set_rejects_bad_scalar(monkeypatch, tmp_path) -> None:
     assert runner.invoke(cli.app, ["config", "set", "num", "0"]).exit_code != 0
     assert runner.invoke(cli.app, ["config", "set", "num", "abc"]).exit_code != 0
     assert runner.invoke(cli.app, ["config", "set", "synthesizer", "nope"]).exit_code != 0
+    assert runner.invoke(cli.app, ["config", "set", "moderator", "nope"]).exit_code != 0
+
+
+def test_config_set_moderator_roundtrip(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(cli.app, ["config", "set", "moderator", "claude"]).exit_code == 0
+    assert load_config()["moderator"] == "claude"
+    assert runner.invoke(cli.app, ["config", "set", "moderator", "auto"]).exit_code == 0
+    assert load_config()["moderator"] == "auto"
+    assert runner.invoke(cli.app, ["config", "unset", "moderator"]).exit_code == 0
+    assert "moderator" not in load_config()
 
 
 def test_config_unset_scalar(monkeypatch, tmp_path) -> None:
@@ -1117,6 +1162,7 @@ def test_config_show_includes_defaults_and_path(monkeypatch, tmp_path) -> None:
     # Defaults for unset keys still show.
     assert "timeout = 180" in result.stdout
     assert 'synthesizer = "auto"' in result.stdout
+    assert 'moderator = "auto"' in result.stdout
 
 
 def test_config_path_prints_file(monkeypatch, tmp_path) -> None:
@@ -1235,6 +1281,30 @@ def test_config_synthesizer_default_in_distill(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 0
     # synthesizer=codex from config -> codex distills (not the auto default claude).
     assert "synthesis · via codex" in result.stdout
+
+
+def test_config_moderator_default_in_debate(monkeypatch, tmp_path) -> None:
+    # debate's verb-specific --moderator merges from config when omitted, and a
+    # CLI flag still wins over it.
+    _install_all(monkeypatch)
+    _config_env(monkeypatch, tmp_path)
+    (tmp_path / "config.toml").write_text('moderator = "agy"\n', encoding="utf-8")
+
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+        return _ok(provider.name, "answer")
+
+    monkeypatch.setattr(cli, "run_provider", fake_run_provider)
+    runner = CliRunner()
+    # No --moderator: config's agy moderates.
+    result = runner.invoke(cli.app, ["debate", "-p", "claude", "-p", "codex", "-p", "agy", "-r", "1", "hi"])
+    assert result.exit_code == 0
+    assert "verdict · moderator agy" in result.stdout
+    # --moderator wins over config.
+    result = runner.invoke(
+        cli.app, ["debate", "-p", "claude", "-p", "codex", "--moderator", "codex", "-r", "1", "hi"]
+    )
+    assert result.exit_code == 0
+    assert "verdict · moderator codex" in result.stdout
 
 
 def test_flag_equal_to_default_still_beats_config(monkeypatch, tmp_path) -> None:

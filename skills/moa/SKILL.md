@@ -19,9 +19,9 @@ It has three verbs that share the same flags:
   parallel; every answer streams back with attribution as it lands. **This is the default.**
 - **`moa distill PROMPT`** - council, then one strong aggregator merges the answers into a
   single unified response. Use when you want *one* synthesized answer, not N to read.
-- **`moa debate PROMPT`** - sequential adversarial rounds, then a neutral judge writes the
-  verdict. The costliest and least reliably-beneficial mode - use only to surface and
-  stress-test disagreement (see the caveat below).
+- **`moa debate PROMPT`** - sequential adversarial rounds; a moderator checks for convergence
+  between rounds and writes the verdict. The costliest and least reliably-beneficial mode -
+  use only to surface and stress-test disagreement (see the caveat below).
 
 ## First-time setup
 
@@ -87,8 +87,9 @@ still edit files; moa says so honestly on stderr.)
 - `-f/--file PATH` (or `-f -` for stdin) - read the prompt from a file/pipe.
 
 `distill` adds `-s/--synthesizer` (`auto` | `random` | a provider). `debate` adds
-`-r/--rounds` (default 2, max 4) and `-j/--judge PROVIDER` (must not be a debater; debate
-needs at least 3 agents: 2 debaters + 1 judge). Defaults persist in `~/.moa/config.toml` via
+`-r/--rounds` (default 2, max 4) and `--moderator PROVIDER` (`auto` = the top-priority agent,
+which may also debate; pin a 3rd selected agent for a neutral moderator). Debate needs at
+least 2 agents. Defaults persist in `~/.moa/config.toml` via
 `moa config set ...` so you don't repeat flags.
 
 ## Reporting results
@@ -129,16 +130,17 @@ Be specific about line and reasoning."
 ```bash
 moa debate -x claude "Is the lock ordering in this scheduler actually deadlock-free? \
 <paste the two functions and the lock acquisition order>"
-# 2 debaters argue across rounds; a separate neutral judge writes the verdict.
+# 2 debaters argue across rounds; a moderator checks convergence and writes the verdict.
 ```
 
 ## Caveat on `debate`
 
-Debate is the costliest mode (~`debaters × rounds + 1` model calls) **and the least
-reliably beneficial.** The research is mixed-to-negative: a multi-agent debate can converge
-on a *wrong* answer through conformity, and a confident-but-incorrect debater can win on
-persuasiveness. The neutral judge and adversarial-stance prompt fight this but don't
-eliminate it. For almost everything, `ask` or `distill` is the better default; reach for
+Debate is the costliest mode (~`debaters × rounds` calls plus a moderator check per round and
+the verdict) **and the least reliably beneficial.** The research is mixed-to-negative: a
+multi-agent debate can converge on a *wrong* answer through conformity, and a
+confident-but-incorrect debater can win on persuasiveness. The moderator and adversarial-stance
+prompt fight this but don't eliminate it. For almost everything, `ask` or `distill` is the
+better default; reach for
 `debate` only when surfacing disagreement is the actual goal.
 
 ---

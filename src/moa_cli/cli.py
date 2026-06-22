@@ -377,11 +377,12 @@ def build_synthesis_prompt(
 
 
 # --------------------------------------------------------------------------- #
-# Debate: sequential adversarial rounds, then one neutral judge writes the
-# verdict from the (anonymized + shuffled) full transcript. The literature is
-# clear that debate is the costliest and least reliably-beneficial mode: it can
-# converge on a wrong answer (conformity), so the judge is a separate model and
-# its prompt weighs correctness/evidence over confidence and fluency.
+# Debate: sequential adversarial rounds, with a moderator that checks for
+# convergence after each round and then writes the verdict from the (anonymized
+# + shuffled) full transcript. The literature is clear that debate is the
+# costliest and least reliably-beneficial mode: it can converge on a wrong answer
+# (conformity), so the verdict prompt weighs correctness/evidence over confidence
+# and fluency, and the anonymization holds even when the moderator also debated.
 # --------------------------------------------------------------------------- #
 
 ROUNDS_MAX = 4
@@ -393,23 +394,16 @@ ADVERSARIAL_INSTRUCTION = """Before giving your own answer, critically examine t
 other participant's answer above: identify any errors, weaknesses, unsupported claims, or \
 gaps in reasoning. Do NOT agree merely to reach consensus - only concede a point if it is \
 genuinely correct. Then give your own best, complete answer to the original question, \
-incorporating any valid corrections.
+incorporating any valid corrections."""
 
-If, after this scrutiny, you have no substantive change to your previous answer and you agree \
-with the other participant, say so explicitly by starting your reply with the line \
-"NO SUBSTANTIVE CHANGE" - this lets the debate stop early."""
-
-# Phrase a debater emits when it has nothing substantive to add. When all active
-# debaters in a round signal this, the debate stops before the round cap.
-CONVERGENCE_MARKER = "NO SUBSTANTIVE CHANGE"
-
-# The neutral judge reads the full transcript (anonymized + shuffled) and writes
-# the final answer. It must weigh correctness/evidence over confidence/fluency -
-# this is where conformity-to-a-wrong-answer is most dangerous, so the judge
-# never just echoes the most fluent or most confident debater.
-JUDGE_PROMPT = """You are a neutral judge. Below is a transcript of a debate between AI coding \
-assistants who answered the user's question and then critiqued each other's answers across \
-several rounds. The participants are anonymized and presented in arbitrary order.
+# The moderator reads the full transcript (anonymized + shuffled) and writes the
+# final answer. It must weigh correctness/evidence over confidence/fluency - this
+# is where conformity-to-a-wrong-answer is most dangerous, so it never just echoes
+# the most fluent or most confident debater.
+MODERATOR_VERDICT_PROMPT = """You are the moderator of this debate. Below is a transcript of a \
+debate between AI coding assistants who answered the user's question and then critiqued each \
+other's answers across several rounds. The participants are anonymized and presented in \
+arbitrary order.
 
 Your task is to read the full debate and write the single best, final answer to the user's \
 question. Weigh correctness and the strength of evidence and reasoning ABOVE confidence, \
@@ -424,43 +418,50 @@ best possible answer.
 asserted.
 - Do not invent information that the debate does not support."""
 
+# After each non-final round the moderator decides whether another round would
+# materially help. It replies with a single leading word the caller branches on.
+CONVERGENCE_DONE = "DONE"
+MODERATOR_CONVERGENCE_PROMPT = """You are the moderator of this debate. Below are the debaters' \
+latest answers to the user's question, anonymized. Decide whether they have converged on an \
+answer, or at least fully aired and clarified their disagreement, so that another round would \
+add nothing material.
+
+Reply with EXACTLY one word on the first line: DONE if the debate should stop now, or CONTINUE \
+if another round would materially improve the final answer. Add nothing else."""
+
 
 def assign_debate_roles(
-    selected: list[Provider], judge: str | None
+    selected: list[Provider], moderator: str | None
 ) -> tuple[list[Provider], Provider]:
-    """Split the selected providers into (debaters, judge).
+    """Split the selected providers into (debaters, moderator).
 
-    Default: the top 2 selected providers debate and the next one judges (so the
-    default n=3 maps to 2 debaters + 1 judge). `judge` (from -j/--judge) pins the
-    judge to a named provider, which must be one of the selected providers and
-    must NOT also be a debater. Requires at least 2 debaters and 1 distinct judge;
-    raises ValueError otherwise (the caller turns this into a clean exit - debate
-    never silently degrades to fewer participants).
+    The top 2 selected providers debate. The moderator runs the per-round
+    convergence check and writes the final verdict; it MAY be one of the debaters.
+    `moderator` is "auto" (or None) -> the top-priority selected provider (so the
+    default 2-agent debate has agent #1 also moderate), or a provider name that
+    must be among the selected providers (pin a non-debating 3rd for a neutral
+    moderator). Requires at least 2 selected providers; raises ValueError
+    otherwise (the caller turns this into a clean exit - debate never silently
+    degrades).
     """
-    if judge is not None:
-        names = [p.name for p in selected]
-        if judge not in PROVIDERS:
-            raise ValueError(f"Unknown judge: {judge}")
-        if judge not in names:
-            raise ValueError(
-                f"Judge {judge!r} is not among the selected providers ({', '.join(names)}). "
-                f"Pin it with -p {judge} or widen the selection."
-            )
-        judge_provider = next(p for p in selected if p.name == judge)
-        debaters = [p for p in selected if p.name != judge]
-        if len(debaters) < 2:
-            raise ValueError(
-                f"debate needs at least 2 debaters plus the judge ({judge}); only "
-                f"{len(debaters)} non-judge provider(s) available. Increase -n or -p."
-            )
-        return debaters, judge_provider
-
-    if len(selected) < 3:
+    if len(selected) < 2:
         raise ValueError(
-            f"debate needs at least 3 providers (2 debaters + 1 neutral judge); "
-            f"only {len(selected)} available. Increase -n, pin more with -p, or install more agents."
+            f"debate needs at least 2 providers (2 debaters); only {len(selected)} available. "
+            f"Increase -n, pin more with -p, or install more agents."
         )
-    return selected[:2], selected[2]
+    debaters = selected[:2]
+    if moderator in (None, "auto"):
+        return debaters, selected[0]
+
+    names = [p.name for p in selected]
+    if moderator not in PROVIDERS:
+        raise ValueError(f"Unknown moderator: {moderator}")
+    if moderator not in names:
+        raise ValueError(
+            f"Moderator {moderator!r} is not among the selected providers ({', '.join(names)}). "
+            f"Pin it with -p {moderator} or widen the selection."
+        )
+    return debaters, next(p for p in selected if p.name == moderator)
 
 
 def clamp_rounds(rounds: int) -> tuple[int, str | None]:
@@ -496,18 +497,19 @@ def build_debate_turn_prompt(
     )
 
 
-def build_judge_prompt(
+def build_verdict_prompt(
     question: str,
     transcript: list[RunResult],
     rng: random.Random | None = None,
 ) -> tuple[str, dict[str, str]]:
-    """Build the judge prompt from the debate transcript, anonymized + shuffled.
+    """Build the moderator's final-verdict prompt from the transcript, anonymized
+    + shuffled.
 
-    The transcript is the per-turn RunResults; the judge sees only the final
-    answer text of each turn, relabelled "Participant 1/2/.." in shuffled order
-    (a model is judging, so brand/position bias is killed per the research). The
-    label_map maps each label back to the real provider for the caller, though
-    debate does not reveal it in the verdict.
+    The transcript is the per-turn RunResults; the moderator sees only the final
+    answer text of each turn, relabelled "Participant 1/2/.." in shuffled order so
+    brand/position bias is killed - this matters even when the moderator is itself
+    a debater, since it can't tell which answer is its own. The label_map maps each
+    label back to the real provider for the caller, though debate never reveals it.
     """
     turns = [r for r in transcript if r.status == "ok"]
     shuffled = list(turns)
@@ -519,11 +521,25 @@ def build_judge_prompt(
         sections.append(f"### {label}\n\n{result.stdout.strip()}")
         label_map[label] = result.provider
     prompt = (
-        f"{JUDGE_PROMPT}\n\n"
+        f"{MODERATOR_VERDICT_PROMPT}\n\n"
         f"## User question\n\n{question}\n\n"
         f"## Debate transcript\n\n" + "\n\n".join(sections) + "\n\n## Your final answer\n"
     )
     return prompt, label_map
+
+
+def build_convergence_prompt(question: str, latest: list[RunResult]) -> str:
+    """The moderator's per-round convergence check. `latest` is the debaters' most
+    recent answers, anonymized so the moderator judges substance over brand. The
+    expected reply starts with DONE (stop) or CONTINUE (another round helps)."""
+    answers = "\n\n".join(
+        f"### Participant {i + 1}\n\n{r.stdout.strip()}" for i, r in enumerate(latest)
+    )
+    return (
+        f"{MODERATOR_CONVERGENCE_PROMPT}\n\n"
+        f"## User question\n\n{question}\n\n"
+        f"## The debaters' latest answers\n\n{answers}\n\n## Your decision\n"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -627,10 +643,10 @@ def render_debate_turn_block(result: RunResult, round_num: int, plain: bool | No
     return _render(label, result, plain)
 
 
-def render_judge_block(result: RunResult, judge: str, plain: bool | None = None) -> str:
+def render_verdict_block(result: RunResult, moderator: str, plain: bool | None = None) -> str:
     if plain is None:
         plain = _plain_output()
-    label = f"verdict · judge {judge} · {_status_label(result.status)} · {result.elapsed:.1f}s"
+    label = f"verdict · moderator {moderator} · {_status_label(result.status)} · {result.elapsed:.1f}s"
     return _render(label, result, plain)
 
 
@@ -648,10 +664,10 @@ def debate_turn_record(result: RunResult, round_num: int) -> dict:
     }
 
 
-def judge_record(result: RunResult, judge: str) -> dict:
+def verdict_record(result: RunResult, moderator: str) -> dict:
     return {
         "type": "verdict",
-        "judge": judge,
+        "moderator": moderator,
         "status": result.status,
         "elapsed": round(result.elapsed, 3),
         "text": result.stdout,
@@ -672,12 +688,21 @@ def judge_record(result: RunResult, judge: str) -> dict:
 
 # Scalar config keys and the type each maps to. `exclude` (list[str]) and the
 # `[models]` table are handled separately because they aren't plain scalars.
-_CONFIG_SCALARS: dict[str, type] = {"num": int, "timeout": float, "synthesizer": str}
+_CONFIG_SCALARS: dict[str, type] = {"num": int, "timeout": float, "synthesizer": str, "moderator": str}
 _CONFIG_KEYS: tuple[str, ...] = (*_CONFIG_SCALARS, "exclude", "models")
 # Synthesizer accepts the special modes plus any known provider name.
 _SYNTHESIZER_MODES: tuple[str, ...] = ("auto", "first", "random")
+# Moderator accepts "auto" (the top-priority selected agent) or a provider name.
+_MODERATOR_MODES: tuple[str, ...] = ("auto",)
 # The built-in defaults, shown by `config show` when a key isn't in the file.
-_CONFIG_DEFAULTS: dict = {"num": 3, "timeout": 180.0, "synthesizer": "auto", "exclude": [], "models": {}}
+_CONFIG_DEFAULTS: dict = {
+    "num": 3,
+    "timeout": 180.0,
+    "synthesizer": "auto",
+    "moderator": "auto",
+    "exclude": [],
+    "models": {},
+}
 
 
 def config_dir() -> Path:
@@ -709,6 +734,9 @@ def _validate_scalar(key: str, value) -> None:
     if key == "synthesizer" and value not in (*_SYNTHESIZER_MODES, *PROVIDERS):
         allowed = ", ".join((*_SYNTHESIZER_MODES, *PROVIDERS))
         raise ValueError(f"synthesizer must be one of: {allowed}.")
+    if key == "moderator" and value not in (*_MODERATOR_MODES, *PROVIDERS):
+        allowed = ", ".join((*_MODERATOR_MODES, *PROVIDERS))
+        raise ValueError(f"moderator must be one of: {allowed}.")
 
 
 def load_config() -> dict:
@@ -786,6 +814,8 @@ def serialize_config(config: dict) -> str:
         lines.append(f"timeout = {int(timeout) if timeout.is_integer() else timeout!r}")
     if "synthesizer" in config:
         lines.append(f"synthesizer = {_toml_str(config['synthesizer'])}")
+    if "moderator" in config:
+        lines.append(f"moderator = {_toml_str(config['moderator'])}")
     if "exclude" in config:
         items = ", ".join(_toml_str(v) for v in config["exclude"])
         lines.append(f"exclude = [{items}]")
@@ -973,6 +1003,7 @@ def resolve_run(
     timeout: float | None,
     json_output: bool,
     yolo: bool,
+    default_num: int = 3,
 ) -> RunConfig:
     """Resolve the shared options into a RunConfig, emitting the selection note.
 
@@ -981,7 +1012,9 @@ def resolve_run(
     flag), parse model overrides, select providers, and print the stderr
     selection note (including agy's honest partial-protection note). Every verb
     picks up config defaults identically because the merge lives only here.
-    Raises typer.BadParameter on bad input and typer.Exit(1) when nothing runs.
+    `default_num` is the built-in fallback when neither flag nor config sets num
+    (debate passes 2, since it only needs 2 agents). Raises typer.BadParameter on
+    bad input and typer.Exit(1) when nothing runs.
     """
     prompt_text = _read_prompt(prompt, file)
     if not prompt_text:
@@ -993,7 +1026,7 @@ def resolve_run(
     except ValueError as exc:
         raise typer.BadParameter(f"{config_path()}: {exc}") from exc
 
-    num = resolve_option(num, "num", config, 3)
+    num = resolve_option(num, "num", config, default_num)
     timeout = resolve_option(timeout, "timeout", config, 180.0)
     # Repeatable flags are an empty list when omitted, not None, so treat empty
     # as "fall back to config" for exclude.
@@ -1131,9 +1164,12 @@ def _run_synthesis(
 RoundsOpt = Annotated[
     int, typer.Option("--rounds", "-r", help=f"Debate rounds (default 2, hard max {ROUNDS_MAX}).")
 ]
-JudgeOpt = Annotated[
+ModeratorOpt = Annotated[
     str | None,
-    typer.Option("--judge", "-j", help="Provider that judges (must not be a debater)."),
+    typer.Option(
+        "--moderator", "-j",
+        help="Moderator that checks convergence and writes the verdict: auto | a provider.",
+    ),
 ]
 
 
@@ -1147,60 +1183,80 @@ def debate(
     file: FileOpt = None,
     timeout: TimeoutOpt = None,
     rounds: RoundsOpt = 2,
-    judge: JudgeOpt = None,
+    moderator: ModeratorOpt = None,
     json_output: JsonOpt = False,
     yolo: YoloOpt = False,
 ) -> None:
-    """Debate: debaters answer and critique each other across rounds; a neutral judge gives the verdict."""
-    cfg = resolve_run(prompt, file, num, provider, exclude, model, timeout, json_output, yolo)
+    """Debate: two debaters answer and critique each other across rounds; a moderator checks convergence and writes the verdict."""
+    # Debate only needs 2 agents (the moderator may also be a debater), so its
+    # built-in default selection is 2, not the usual 3.
+    cfg = resolve_run(
+        prompt, file, num, provider, exclude, model, timeout, json_output, yolo, default_num=2
+    )
+
+    # moderator is verb-specific (like distill's synthesizer) but persistable, so
+    # it merges through the same precedence: CLI flag > config file > built-in.
+    moderator = resolve_option(moderator, "moderator", _read_config_or_empty(), "auto")
 
     rounds, warning = clamp_rounds(rounds)
     if warning:
         _note(warning)
 
     try:
-        debaters, judge_provider = assign_debate_roles(cfg.selected, judge)
+        debaters, moderator_provider = assign_debate_roles(cfg.selected, moderator)
     except ValueError as exc:
         _note(f"debate: {exc}")
         raise typer.Exit(code=1) from exc
 
     _note(
-        f"Debating: {', '.join(p.name for p in debaters)} over {rounds} round(s), "
-        f"judge {judge_provider.name}. Debate is the costliest mode "
-        f"(~{len(debaters) * rounds + 1} model calls) and can converge on a wrong answer."
+        f"Debating: {', '.join(p.name for p in debaters)} over up to {rounds} round(s), "
+        f"moderator {moderator_provider.name}. Debate is the costliest mode and can "
+        f"converge on a wrong answer."
     )
 
-    transcript = asyncio.run(_run_debate(cfg, debaters, judge_provider, rounds))
+    transcript = asyncio.run(_run_debate(cfg, debaters, moderator_provider, rounds))
     if not any(r.status == "ok" for r in transcript):
         raise typer.Exit(code=1)
 
 
-def _signals_convergence(result: RunResult) -> bool:
-    """A debater concedes when its answer opens with the convergence marker."""
-    return result.status == "ok" and result.stdout.strip().upper().startswith(CONVERGENCE_MARKER)
+async def _moderator_signals_done(
+    cfg: RunConfig, moderator: Provider, latest_ok: list[RunResult], round_num: int
+) -> bool:
+    """Ask the moderator whether the debate has converged. Returns True (stop)
+    only on a clean DONE reply; a failed or CONTINUE check keeps debating."""
+    prompt = build_convergence_prompt(cfg.prompt, latest_ok)
+    _note(f"Round {round_num}: moderator {moderator.name} checking for convergence...")
+    result = await run_provider(
+        moderator, prompt, cfg.timeout, cfg.models.get(moderator.name), cfg.yolo
+    )
+    done = result.status == "ok" and result.stdout.strip().upper().startswith(CONVERGENCE_DONE)
+    if done:
+        _note(f"Moderator {moderator.name}: converged; stopping after round {round_num}.")
+    return done
 
 
 async def _run_debate(
     cfg: RunConfig,
     debaters: list[Provider],
-    judge: Provider,
+    moderator: Provider,
     rounds: int,
 ) -> list[RunResult]:
-    """Run the sequential debate, then the judge. Returns the full transcript.
+    """Run the sequential debate, then the moderator's verdict. Returns the full
+    transcript.
 
-    Each debater keeps its latest answer in `latest`. A turn shows the debater
-    the OTHER debaters' latest answers (anonymized) plus the adversarial
-    instruction; the very first turn (no priors yet) is a cold answer. Turns
-    stream as they complete (stderr progress + stdout/JSON block). If every
-    active debater signals "no substantive change" in a round, the debate stops
-    before the cap. The judge then reads the blind+shuffled transcript and writes
-    the verdict last.
+    Each debater keeps its latest answer in `latest`. A turn shows the debater the
+    OTHER debaters' latest answers (anonymized) plus the adversarial instruction;
+    the very first turn (no priors yet) is a cold answer. Turns stream as they
+    complete (stderr progress + stdout/JSON block). After each non-final round the
+    moderator decides whether the debate has converged and can stop early. The
+    moderator then reads the blind+shuffled transcript and writes the verdict last
+    (it may itself be a debater - the anonymization stops it favouring its own
+    answer).
     """
     transcript: list[RunResult] = []
     latest: dict[str, RunResult] = {}
 
     for round_num in range(1, rounds + 1):
-        converged_this_round = True
         for debater in debaters:
             prior = [
                 ("the other participant", latest[other.name].stdout)
@@ -1219,34 +1275,36 @@ async def _run_debate(
                 if cfg.json_output
                 else render_debate_turn_block(result, round_num)
             )
-            # A debater that errors out is not "converged"; only an explicit
-            # no-change signal counts toward an early stop.
-            if not _signals_convergence(result):
-                converged_this_round = False
 
-        # Round 1 always has at least one cold answer (no prior to converge on),
-        # so early-stop is only meaningful from round 2 onward.
-        if round_num >= 2 and converged_this_round:
-            _note(f"Debate converged after round {round_num} (no substantive changes); stopping early.")
-            break
+        # After each non-final round, let the moderator stop early if the debaters
+        # have converged. Needs both debaters' latest answers to compare.
+        if round_num < rounds:
+            latest_ok = [
+                latest[d.name] for d in debaters
+                if d.name in latest and latest[d.name].status == "ok"
+            ]
+            if len(latest_ok) >= 2 and await _moderator_signals_done(
+                cfg, moderator, latest_ok, round_num
+            ):
+                break
 
     if not any(r.status == "ok" for r in transcript):
-        _note("Debate produced no usable answers; skipping judge.")
+        _note("Debate produced no usable answers; skipping the moderator verdict.")
         return transcript
 
-    # The judge always sees the transcript anonymized + shuffled (a model is
-    # judging; per item 002 there is no toggle). It runs in the same read-only /
-    # --yolo mode as the debaters - no permission bypass.
-    judge_prompt, _label_map = build_judge_prompt(cfg.prompt, transcript)
-    _note(f"Judging with {judge.name}...")
+    # The moderator always sees the transcript anonymized + shuffled (a model is
+    # judging; no toggle). It runs in the same read-only / --yolo mode as the
+    # debaters - no permission bypass.
+    verdict_prompt, _label_map = build_verdict_prompt(cfg.prompt, transcript)
+    _note(f"Moderator {moderator.name} writing the final answer...")
     verdict = await run_provider(
-        judge, judge_prompt, cfg.timeout, cfg.models.get(judge.name), cfg.yolo
+        moderator, verdict_prompt, cfg.timeout, cfg.models.get(moderator.name), cfg.yolo
     )
     transcript.append(verdict)
     _emit(
-        json.dumps(judge_record(verdict, judge.name))
+        json.dumps(verdict_record(verdict, moderator.name))
         if cfg.json_output
-        else render_judge_block(verdict, judge.name)
+        else render_verdict_block(verdict, moderator.name)
     )
     return transcript
 
@@ -1313,7 +1371,7 @@ def config_show() -> None:
 
 @config_app.command("set")
 def config_set(
-    key: Annotated[str, typer.Argument(help="Config key: num | timeout | synthesizer | exclude | model.")],
+    key: Annotated[str, typer.Argument(help="Config key: num | timeout | synthesizer | moderator | exclude | model.")],
     value: Annotated[str, typer.Argument(help="Value. For models: PROVIDER=MODEL. For exclude: comma-separated names.")],
 ) -> None:
     """Write a value to the config file, creating the dir/file if missing."""
@@ -1346,7 +1404,7 @@ def config_set(
             raise typer.BadParameter(str(exc)) from exc
         config[key] = coerced
     else:
-        known = "num, timeout, synthesizer, exclude, model"
+        known = "num, timeout, synthesizer, moderator, exclude, model"
         raise typer.BadParameter(f"Unknown config key: {key!r}. Known: {known}.")
 
     write_config(config)

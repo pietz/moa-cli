@@ -8,7 +8,7 @@
 
 # MOA - Mixture of Agents
 
-Ask one question to multiple local AI coding CLIs **in parallel** and collect their answers. MOA detects which agent CLIs you have installed (Claude Code, Codex, agy, opencode), fans your prompt out to them, and streams each answer back the moment that agent finishes. Or run `moa distill` to have a strong aggregator merge those answers into a single unified response, or `moa debate` to have them critique each other across rounds before a neutral judge gives the verdict.
+Ask one question to multiple local AI coding CLIs **in parallel** and collect their answers. MOA detects which agent CLIs you have installed (Claude Code, Codex, agy, opencode), fans your prompt out to them, and streams each answer back the moment that agent finishes. Or run `moa distill` to have a strong aggregator merge those answers into a single unified response, or `moa debate` to have them critique each other across rounds while a moderator checks for convergence and writes the verdict.
 
 It's a drop-in, batteries-included replacement for hand-rolling parallel `claude -p` / `codex exec` / `opencode run` calls (or a "peer review" agent skill): one command, clean attributed output, made to be called by a human **or** by another agent.
 
@@ -62,7 +62,7 @@ MOA has three prompt verbs that share the same selection/output options:
 
 - **`moa ask PROMPT`** - council / peer review: N agents answer the same prompt in parallel; every answer is returned with attribution, streamed as it lands.
 - **`moa distill PROMPT`** - synthesis: run the council, then one strong aggregator merges the answers into a single unified response.
-- **`moa debate PROMPT`** - sequential debate: two debaters answer and adversarially critique each other across rounds, then a separate neutral judge writes the final verdict. The costliest mode; read the caveats below before reaching for it.
+- **`moa debate PROMPT`** - sequential debate: two debaters answer and adversarially critique each other across rounds, with a moderator that checks for convergence between rounds and writes the final verdict. The costliest mode; read the caveats below before reaching for it.
 
 ```bash
 moa doctor                                  # show installed CLIs and their default models
@@ -76,12 +76,12 @@ moa ask --json "..."                        # machine-readable JSONL (for agents
 git diff | moa ask -f - "Review this diff." # read the prompt from stdin
 moa distill "Design a rate limiter."        # council, then merge into one answer
 moa distill -s codex "..."                  # pick who distills (auto | random | provider)
-moa debate "Is this race condition real?"   # 2 debaters + a judge (default n=3)
+moa debate "Is this race condition real?"   # 2 debaters; the first also moderates (default 2 agents)
 moa debate -r 3 "..."                        # more rounds (default 2, hard max 4)
-moa debate -j claude "..."                   # pin who judges (must not be a debater)
+moa debate --moderator agy "..."             # pin a neutral moderator (a non-debater)
 ```
 
-The shared options (`-n/--num`, `-p/--provider`, `-x/--exclude`, `-m/--model`, `-t/--timeout`, `-f/--file`, `--json`, `--yolo`) work identically on all three verbs. `distill` adds `-s/--synthesizer`; `debate` adds `-r/--rounds` and `-j/--judge`.
+The shared options (`-n/--num`, `-p/--provider`, `-x/--exclude`, `-m/--model`, `-t/--timeout`, `-f/--file`, `--json`, `--yolo`) work identically on all three verbs. `distill` adds `-s/--synthesizer`; `debate` adds `-r/--rounds` and `--moderator`.
 
 ### Read-only by default
 
@@ -192,7 +192,7 @@ moa config unset num                  # remove a key
 moa config unset model claude         # remove one [models] entry
 ```
 
-The synthesizer default is persistable too (e.g. `moa config set synthesizer codex`); `debate`'s `-r/--rounds` and `-j/--judge` are not persisted. CLI `-m` overrides win per-provider over the config `[models]` table.
+The role defaults are persistable too: the distill `synthesizer` and the debate `moderator` (e.g. `moa config set synthesizer codex`, `moa config set moderator agy`). `debate`'s `-r/--rounds` is not persisted. CLI `-m` overrides win per-provider over the config `[models]` table.
 
 ### Output
 
@@ -210,23 +210,23 @@ The synthesizer default is persistable too (e.g. `moa config set synthesizer cod
 
 The aggregator prompt is adapted from the Mixture-of-Agents "Aggregate-and-Synthesize" prompt (Wang et al. 2024): it tells the aggregator to critically evaluate the inputs (some may be biased or incorrect) and not to simply replicate them but offer a refined, accurate, comprehensive reply.
 
-### `moa debate` (sequential debate + neutral judge)
+### `moa debate` (sequential debate + moderator)
 
-`debate` is the opt-in, highest-cost mode. Instead of fanning out in parallel, it runs a sequential, adversarial exchange and then asks a **separate neutral judge** to write the final answer.
+`debate` is the opt-in, highest-cost mode. Instead of fanning out in parallel, it runs a sequential, adversarial exchange overseen by a **moderator** that checks for convergence between rounds and writes the final answer.
 
-**Roles.** By default the top **2** selected agents are the debaters and the **3rd** is the judge - so the default `-n 3` maps to *2 debaters + 1 judge*. Pin a specific judge with `-j/--judge PROVIDER`; the judge must be one of the selected agents and must **not** also be a debater. Debate needs at least 2 debaters and 1 distinct judge, so it needs at least 3 agents; with fewer it exits with a clear message rather than silently degrading.
+**Roles.** The top **2** selected agents are the debaters. The **moderator** runs the per-round convergence check and writes the verdict; by default it is the top-priority selected agent (so the default 2-agent debate has agent #1 also moderate). Debate only needs **2 agents**; with fewer it exits cleanly rather than silently degrading. For a **neutral** moderator that doesn't also debate, select a third agent and pin it: `moa debate -n 3 --moderator <provider>` (the moderator must be one of the selected agents). The moderator only ever sees the transcript **anonymized + shuffled**, so even when it is itself a debater it can't favour its own answer.
 
 **Rounds.** `-r/--rounds` defaults to **2** (gains plateau around 2-3 rounds while token cost grows multiplicatively) and is hard-capped at **4** - higher values are clamped with a warning on stderr.
 
-**The loop.** Round 1: debater A answers cold; debater B sees A's answer with an adversarial-stance instruction ("identify errors/weaknesses before giving your own answer; do not agree merely to reach consensus"). Each later round, every debater sees the other's latest answer and responds in the same spirit. If every debater signals it has *no substantive change* (it may open its reply with `NO SUBSTANTIVE CHANGE`), the debate stops early before the cap.
+**The loop.** Round 1: debater A answers cold; debater B sees A's answer with an adversarial-stance instruction ("identify errors/weaknesses before giving your own answer; do not agree merely to reach consensus"). Each later round, every debater sees the other's latest answer and responds in the same spirit. After each non-final round the **moderator** reads the debaters' latest answers and replies `DONE` (they've converged or fully aired their disagreement) or `CONTINUE`; a `DONE` stops the debate before the cap.
 
-**The judge.** A model that is **not** a debater reads the full transcript - presented **anonymized and order-shuffled** (a model is judging, so brand/position bias is killed) - and writes the final answer. Its prompt instructs it to weigh correctness and evidence **above** confidence and fluency. The judge's verdict is the final block (`──── verdict · judge <name> · ... ────`).
+**The verdict.** The moderator reads the full transcript - presented **anonymized and order-shuffled** (so brand/position bias is killed, even when the moderator was a debater) - and writes the final answer. Its prompt instructs it to weigh correctness and evidence **above** confidence and fluency. The verdict is the final block (`──── verdict · moderator <name> · ... ────`).
 
-**Streaming/output.** Each debater's turn streams as it completes (`──── round N · <provider> · ... ────`), then the judge's verdict last. `--json` emits a `{"type": "debate_turn", "round": N, ...}` record per turn plus a final `{"type": "verdict", ...}` record.
+**Streaming/output.** Each debater's turn streams as it completes (`──── round N · <provider> · ... ────`), then the moderator's verdict last. `--json` emits a `{"type": "debate_turn", "round": N, ...}` record per turn plus a final `{"type": "verdict", "moderator": "<name>", ...}` record.
 
-**Safety.** Debaters and the judge run in the same read-only (or `--yolo`) mode as the other verbs - there is no permission bypass. agy's partial-sandbox caveat (shell only; it can still edit files) applies here too.
+**Safety.** Debaters and the moderator run in the same read-only (or `--yolo`) mode as the other verbs - there is no permission bypass. agy's partial-sandbox caveat (shell only; it can still edit files) applies here too.
 
-> **Caveat - use sparingly.** Debate is the costliest mode (roughly `debaters x rounds + 1` model calls) **and the least reliably beneficial.** The research is mixed-to-negative: multi-agent debate can converge on a *wrong* answer through conformity, a confident-but-incorrect debater can win on persuasiveness over correctness, and more rounds can entrench an error rather than fix it. The separate neutral judge and the adversarial-stance prompt are there to fight these failure modes, but they do not eliminate them. For most questions, `ask` or `distill` is the better default; reach for `debate` when you specifically want to surface and stress-test disagreement. (See *Can LLM Agents Really Debate?* arXiv:2511.07784, *Talk Isn't Always Cheap* arXiv:2509.05396, and the conformity/position-bias work cited in the design notes.)
+> **Caveat - use sparingly.** Debate is the costliest mode (roughly `debaters × rounds` calls, plus a moderator check per round and the verdict) **and the least reliably beneficial.** The research is mixed-to-negative: multi-agent debate can converge on a *wrong* answer through conformity, a confident-but-incorrect debater can win on persuasiveness over correctness, and more rounds can entrench an error rather than fix it. The moderator and the adversarial-stance prompt are there to fight these failure modes, but they do not eliminate them. For most questions, `ask` or `distill` is the better default; reach for `debate` when you specifically want to surface and stress-test disagreement. (See *Can LLM Agents Really Debate?* arXiv:2511.07784, *Talk Isn't Always Cheap* arXiv:2509.05396, and the conformity/position-bias work cited in the design notes.)
 
 ### Attribution policy
 
