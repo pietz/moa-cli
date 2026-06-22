@@ -16,8 +16,10 @@ agents. A reviewer confirmed `opencode` ran with full auto-approved file-edit + 
 - **`--yolo`** opt-in flag grants all tools full write access.
 - Keep it **uncluttered**: a structured per-provider permission map, not per-tool
   special-casing in the builders.
-- **Tools with no read-only mode are excluded from the default (safe) panel** - do
-  NOT complicate moa with config-file hacks to force them. They return only under `--yolo`.
+- **Tools with no read-only mode (agy) still run by default** - they stay in the
+  panel (agy at priority #3) and run UNSCOPED (no read-only flag, since none works).
+  Do NOT exclude them and do NOT use config-file hacks. moa notes on stderr that
+  they aren't sandboxed so the user knows.
 
 ## Design: structured permission map
 
@@ -36,8 +38,10 @@ command before the prompt. `readonly is None` => the tool can't be sandboxed.
 | opencode | `--agent plan` (+ pin `-m provider/model`) | default `build` agent |
 | agy      | **none exists** | default (full access) |
 
-- **agy:** no flag sandboxes it (`--sandbox` does NOT stop its `write_file` tool -
-  verified). So `readonly = None` -> excluded from the default panel; runs only under `--yolo`.
+- **agy:** no flag reliably sandboxes its file-writing tools (`--sandbox` only
+  restricts the terminal - verified). So `readonly = None` -> agy runs UNSCOPED but
+  STAYS in the panel (priority #3, included by default). moa emits a one-time stderr
+  note that agy isn't sandboxed. No pinning error, no exclusion.
 - **codex caveat:** `-s read-only` is a kernel sandbox that also blocks network, so codex
   won't do web research in default mode (it still reads local files). Acceptable for the patch.
 - The builder must **verify the `--yolo` flags live** before shipping.
@@ -46,15 +50,15 @@ command before the prompt. `readonly is None` => the tool can't be sandboxed.
 
 - `moa doctor` shows each provider's **default model** instead of the now-redundant
   executable: `claude (opus)`, `codex (gpt-5.5)`, `agy (Gemini 3.1 Pro (High))`,
-  `opencode (configured default)`. Flag agy as "no read-only - default-excluded".
+  `opencode (configured default)`. Flag agy as "no read-only mode (runs unsandboxed)".
 
 ## Acceptance criteria
 
 - [ ] `Provider` gains a structured `readonly` / `yolo` permission map; the runner splices the right set in.
 - [ ] Default run applies `readonly` flags; `--yolo` applies `yolo` flags to all providers.
-- [ ] Tools with no read-only mode (agy) are excluded from the default panel and run only under `--yolo`; the stderr selection note says so.
+- [ ] Tools with no read-only mode (agy) run unscoped but STAY in the default panel (agy at #3); the stderr note flags them as not sandboxed. No pinning error, no exclusion.
 - [ ] `--yolo` flags verified against the installed CLIs.
-- [ ] `doctor` shows default models (and flags agy as default-excluded).
+- [ ] `doctor` shows default models (and flags agy as "no read-only mode").
 - [ ] Tests: default vs `--yolo` argv per provider; agy excluded by default / present under `--yolo`.
 - [ ] README documents the read-only default, what each tool can/can't do, agy's exclusion, and `--yolo`.
 - [ ] Version bump to 0.1.1.
@@ -63,3 +67,12 @@ command before the prompt. `readonly is None` => the tool can't be sandboxed.
 
 Build on `main` (008 is isolated on its own branch). Run the full loop: builder +
 a separate fresh-eyes reviewer (security fix).
+
+## Post-review follow-ups (verdict: SAFE TO TAG 0.1.1; both non-blocking -> 0.2.0)
+
+- Soften the "agy has no read-only mode" wording (cli.py comment + README): agy DOES
+  have a `--sandbox` flag, but it only restricts the terminal, not its file-writing
+  tools - so excluding agy is still correct. Say "no flag that reliably blocks its
+  file-writing tools."
+- Add a regression test that the synthesis/aggregator run is read-only by default
+  (source is correct but untested). Do it against the `distill` verb when 004 lands.

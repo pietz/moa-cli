@@ -71,7 +71,7 @@ Active tickets only; `done` items move to `archive/`.
 
 | ID  | Item                                          | Status   |
 |-----|-----------------------------------------------|----------|
-| 009 | Read-only by default + --yolo (0.1.1 patch)   | ready    |
+| 009 | Read-only by default + --yolo (0.1.1 patch)   | building |
 | 004 | Collaboration modes (ask/distill/debate verbs)| ready    |
 | 006 | Vote mode                                     | parked   |
 | 007 | Agent skill for skills.sh (depends on 004)    | proposed |
