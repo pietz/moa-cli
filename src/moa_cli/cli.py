@@ -43,8 +43,9 @@ class Provider:
     build: CommandBuilder
     # Permission flags, declared as data rather than branched per tool. `readonly`
     # is spliced in for the safe default (no write access); `None` means the tool
-    # has NO read-only mode and is excluded from the default panel. `yolo` is
-    # spliced in under --yolo to grant full write access.
+    # has NO read-only mode, so by default it runs UNSCOPED (no permission args)
+    # and moa notes on stderr that it isn't sandboxed. `yolo` is spliced in under
+    # --yolo to grant full write access.
     readonly: tuple[str, ...] | None = ()
     yolo: tuple[str, ...] = ()
     # Env keys to drop before spawning. claude refuses to run nested inside
@@ -65,8 +66,8 @@ class Provider:
         """The permission argv for this run: yolo flags under --yolo, else readonly."""
         if yolo:
             return self.yolo
-        # readonly is None only for tools with no read-only mode; those are
-        # filtered out of the default panel before we ever build a command.
+        # readonly is None for tools with no read-only mode (agy): they run
+        # unscoped, with no permission args spliced in.
         return self.readonly or ()
 
 
@@ -114,7 +115,7 @@ PROVIDERS: dict[str, Provider] = {
     ),
     "agy": Provider(
         "agy", "agy", "Gemini 3.1 Pro (High)", _agy,
-        readonly=None,  # no read-only mode exists -> excluded from default panel
+        readonly=None,  # no read-only mode -> runs unscoped (unsandboxed) by default
         yolo=(),
     ),
     "opencode": Provider(
@@ -141,25 +142,21 @@ def missing_provider_names() -> list[str]:
     return [name for name in PRIORITY if not _installed(name)]
 
 
-def _has_readonly(name: str) -> bool:
-    return PROVIDERS[name].readonly is not None
-
-
 def select_for_run(
-    num: int, names: tuple[str, ...] | None, exclude: tuple[str, ...] = (), yolo: bool = False
-) -> tuple[list[Provider], list[str], list[str]]:
+    num: int, names: tuple[str, ...] | None, exclude: tuple[str, ...] = ()
+) -> tuple[list[Provider], list[str]]:
     """Pick providers to run.
 
-    Returns (to_run, skipped_not_installed, dropped_no_readonly).
+    Returns (to_run, skipped_not_installed).
 
     With an explicit `names` list we honour it in order, skipping any not
     installed. Otherwise we take the first `num` installed providers from
     PRIORITY. Excluded providers are dropped before either path takes effect, so
     `-n` counts only non-excluded installs and `-p` pins drop excluded names too.
 
-    Safety: unless `yolo`, providers with no read-only mode (`readonly is None`)
-    are dropped from the default panel and from `-n`. Pinning such a provider via
-    `-p` without `--yolo` is an error - the caller must opt into write access.
+    All installed providers are eligible, including ones with no read-only mode
+    (`readonly is None`); those run unscoped by default - the caller surfaces an
+    "unsandboxed" note on stderr rather than dropping or erroring on them.
     """
     unknown = [name for name in (*(names or ()), *exclude) if name not in PROVIDERS]
     if unknown:
@@ -167,22 +164,11 @@ def select_for_run(
     excluded = set(exclude)
     if names:
         kept = [name for name in names if name not in excluded]
-        if not yolo:
-            pinned_no_ro = [name for name in kept if not _has_readonly(name)]
-            if pinned_no_ro:
-                joined = ", ".join(pinned_no_ro)
-                raise ValueError(
-                    f"{joined} has no read-only mode; rerun with --yolo to allow it (grants write access)"
-                )
         chosen = [PROVIDERS[name] for name in kept if _installed(name)]
         skipped = [name for name in kept if not _installed(name)]
-        return chosen, skipped, []
+        return chosen, skipped
     available = [name for name in available_provider_names() if name not in excluded]
-    dropped: list[str] = []
-    if not yolo:
-        dropped = [name for name in available if not _has_readonly(name)]
-        available = [name for name in available if _has_readonly(name)]
-    return [PROVIDERS[name] for name in available[:num]], [], dropped
+    return [PROVIDERS[name] for name in available[:num]], []
 
 
 # --------------------------------------------------------------------------- #
@@ -531,8 +517,8 @@ def ask(
     models = parse_model_overrides(model)
 
     try:
-        selected, skipped, dropped = select_for_run(
-            num, tuple(provider) if provider else None, tuple(exclude) if exclude else (), yolo
+        selected, skipped = select_for_run(
+            num, tuple(provider) if provider else None, tuple(exclude) if exclude else ()
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -547,8 +533,12 @@ def ask(
         note += f"; skipped (not installed): {', '.join(skipped)}"
     if exclude:
         note += f"; excluded: {', '.join(exclude)}"
-    if dropped:
-        note += f"; dropped (no read-only mode, use --yolo): {', '.join(dropped)}"
+    # Providers with no read-only mode run unscoped in default mode; flag them so
+    # the user knows they aren't sandboxed (not relevant under --yolo).
+    if not yolo:
+        unscoped = [p.name for p in selected if p.readonly is None]
+        if unscoped:
+            note += f"; note: {', '.join(unscoped)} runs unsandboxed (no read-only mode)"
     _note(note)
 
     results = asyncio.run(_collect(selected, prompt_text, timeout, json_output, models, yolo))
@@ -610,7 +600,7 @@ def doctor() -> None:
             model = provider.default_model or "configured default"
             label = f"{name} ({model})"
             if provider.readonly is None:
-                label += " [no read-only - default-excluded]"
+                label += " [no read-only mode (runs unsandboxed)]"
             parts.append(label)
         return ", ".join(parts) or "none"
 

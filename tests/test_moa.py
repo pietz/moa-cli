@@ -62,8 +62,10 @@ def test_perm_args_readonly_vs_yolo_per_provider() -> None:
     assert PROVIDERS["codex"].perm_args(yolo=True) == ("-s", "danger-full-access")
     assert PROVIDERS["opencode"].perm_args(yolo=False) == ("--agent", "plan")
     assert PROVIDERS["opencode"].perm_args(yolo=True) == ()
-    # agy has no read-only mode; under --yolo it gets full access (no extra flag).
+    # agy has no read-only mode; default run is unscoped (no perm args) and
+    # under --yolo it gets full access (also no extra flag).
     assert PROVIDERS["agy"].readonly is None
+    assert PROVIDERS["agy"].perm_args(yolo=False) == ()
     assert PROVIDERS["agy"].perm_args(yolo=True) == ()
 
 
@@ -94,42 +96,26 @@ def test_build_splices_yolo_flags() -> None:
 def test_select_for_run_takes_first_n_installed(monkeypatch) -> None:
     installed = {"claude", "codex", "agy", "opencode"}
     monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
-    # Default (read-only) excludes agy (no read-only mode), so the panel skips it.
+    # agy stays in the default panel at priority #3 (it runs unscoped).
     assert [p.name for p in select_for_run(2, None)[0]] == ["claude", "codex"]
-    assert [p.name for p in select_for_run(3, None)[0]] == ["claude", "codex", "opencode"]
-    # Under --yolo, agy is eligible again and ordering follows PRIORITY.
-    assert [p.name for p in select_for_run(3, None, yolo=True)[0]] == ["claude", "codex", "agy"]
-    assert [p.name for p in select_for_run(4, None, yolo=True)[0]] == [
+    assert [p.name for p in select_for_run(3, None)[0]] == ["claude", "codex", "agy"]
+    assert [p.name for p in select_for_run(4, None)[0]] == [
         "claude", "codex", "agy", "opencode",
     ]
 
 
-def test_select_for_run_drops_agy_by_default(monkeypatch) -> None:
-    # agy has no read-only mode -> dropped from the default panel and reported.
+def test_select_for_run_pins_agy_without_yolo(monkeypatch) -> None:
+    # agy has no read-only mode but is still selectable - it runs unscoped, no error.
     installed = {"claude", "codex", "agy", "opencode"}
     monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
-    chosen, _, dropped = select_for_run(4, None)
-    assert "agy" not in [p.name for p in chosen]
-    assert dropped == ["agy"]
-    # Under --yolo nothing is dropped.
-    chosen, _, dropped = select_for_run(4, None, yolo=True)
-    assert "agy" in [p.name for p in chosen]
-    assert dropped == []
-
-
-def test_select_for_run_pinning_agy_without_yolo_errors(monkeypatch) -> None:
-    installed = {"claude", "codex", "agy", "opencode"}
-    monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
-    with pytest.raises(ValueError, match="agy has no read-only mode"):
-        select_for_run(3, ("agy",))
-    # --yolo allows pinning agy explicitly.
-    chosen, _, _ = select_for_run(3, ("agy",), yolo=True)
+    chosen, skipped = select_for_run(3, ("agy",))
     assert [p.name for p in chosen] == ["agy"]
+    assert skipped == []
 
 
 def test_select_for_run_skips_uninstalled_explicit(monkeypatch) -> None:
     monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe == "claude" else None)
-    chosen, skipped, _ = select_for_run(3, ("claude", "opencode"))
+    chosen, skipped = select_for_run(3, ("claude", "opencode"))
     assert [p.name for p in chosen] == ["claude"]
     assert skipped == ["opencode"]
 
@@ -142,8 +128,7 @@ def test_select_for_run_rejects_unknown() -> None:
 def test_select_for_run_excludes_before_taking_n(monkeypatch) -> None:
     installed = {"claude", "codex", "agy", "opencode"}
     monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
-    # Under --yolo so agy is not auto-dropped; we test exclude independently.
-    chosen, skipped, _ = select_for_run(3, None, exclude=("claude",), yolo=True)
+    chosen, skipped = select_for_run(3, None, exclude=("claude",))
     assert [p.name for p in chosen] == ["codex", "agy", "opencode"]
     assert skipped == []
 
@@ -151,7 +136,7 @@ def test_select_for_run_excludes_before_taking_n(monkeypatch) -> None:
 def test_select_for_run_excludes_from_explicit(monkeypatch) -> None:
     installed = {"claude", "codex", "agy", "opencode"}
     monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
-    chosen, _, _ = select_for_run(3, ("claude", "codex"), exclude=("claude",))
+    chosen, _ = select_for_run(3, ("claude", "codex"), exclude=("claude",))
     assert [p.name for p in chosen] == ["codex"]
 
 
@@ -257,7 +242,7 @@ def test_run_provider_defaults_model_when_no_override(monkeypatch) -> None:
 
 
 def test_run_provider_readonly_by_default_argv(monkeypatch) -> None:
-    # Default run is read-only for every sandboxable provider.
+    # Default run carries each sandboxable provider's read-only flag.
     captured: dict = {}
 
     async def fake_exec(*args, **kwargs):
@@ -265,9 +250,31 @@ def test_run_provider_readonly_by_default_argv(monkeypatch) -> None:
         raise FileNotFoundError
 
     monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+
+    asyncio.run(run_provider(PROVIDERS["claude"], "hi", timeout=5))
+    assert "--permission-mode" in captured["argv"]
+    assert captured["argv"][captured["argv"].index("--permission-mode") + 1] == "plan"
+
     asyncio.run(run_provider(PROVIDERS["codex"], "hi", timeout=5, model="gpt-5.5"))
     assert "-s" in captured["argv"]
     assert captured["argv"][captured["argv"].index("-s") + 1] == "read-only"
+
+    asyncio.run(run_provider(PROVIDERS["opencode"], "hi", timeout=5, model="prov/model"))
+    assert "--agent" in captured["argv"]
+    assert captured["argv"][captured["argv"].index("--agent") + 1] == "plan"
+
+
+def test_run_provider_agy_default_argv_has_no_readonly_flag(monkeypatch) -> None:
+    # agy has no read-only mode, so its default argv runs unscoped (no perm flag).
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["argv"] = list(args)
+        raise FileNotFoundError
+
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(run_provider(PROVIDERS["agy"], "hi", timeout=5, model="g"))
+    assert captured["argv"] == ["agy", "--model", "g", "-p", "hi"]
 
 
 def test_run_provider_yolo_argv(monkeypatch) -> None:
@@ -373,6 +380,6 @@ def test_doctor_shows_default_models(monkeypatch) -> None:
     assert "claude (opus)" in result.stdout
     assert "codex (gpt-5.5)" in result.stdout
     assert "opencode (configured default)" in result.stdout
-    # agy shows its model and the no-read-only / default-excluded marker.
+    # agy shows its model and the no-read-only / unsandboxed marker.
     assert "agy (Gemini 3.1 Pro (High))" in result.stdout
-    assert "no read-only" in result.stdout
+    assert "no read-only mode (runs unsandboxed)" in result.stdout
