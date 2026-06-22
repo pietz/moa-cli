@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 316 82" width="316" height="82" fill="none">
+  <defs>
+    <filter id="venn-glow-full">
+      <feGaussianBlur stdDeviation="1.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <!-- White background so the dark wordmark stays visible on dark pages -->
+  <rect x="0" y="0" width="316" height="82" fill="#ffffff"/>
+  <!-- Venn icon, scale 1.0 (~30% larger), centered vertically. Isolated so the
+       screen blends compose against the group's own transparent backdrop, not the
+       white rect (which would wash the circles out). -->
+  <g transform="translate(42, 41) scale(1.0) translate(-60, -53)" style="isolation:isolate">
+    <circle cx="48" cy="42" r="28" fill="#E4573A" opacity="0.82" filter="url(#venn-glow-full)"/>
+    <circle cx="72" cy="42" r="28" fill="#5CC26E" opacity="0.82" style="mix-blend-mode:screen" filter="url(#venn-glow-full)"/>
+    <circle cx="60" cy="64" r="28" fill="#3572EA" opacity="0.82" style="mix-blend-mode:screen" filter="url(#venn-glow-full)"/>
+  </g>
+  <!-- Dot-matrix wordmark, centered vertically -->
+  <g transform="translate(114, 16)" fill="#1a1a1a">
+    <!-- M -->
+    <circle cx="5" cy="5" r="5"/><circle cx="5" cy="15" r="5"/><circle cx="5" cy="25" r="5"/><circle cx="5" cy="35" r="5"/><circle cx="5" cy="45" r="5"/>
+    <circle cx="15" cy="15" r="5"/><circle cx="15" cy="25" r="5"/><circle cx="15" cy="35" r="5"/><circle cx="15" cy="45" r="5"/>
+    <circle cx="25" cy="5" r="5"/>
+    <circle cx="35" cy="5" r="5"/><circle cx="35" cy="15" r="5"/>
+    <circle cx="45" cy="15" r="5"/><circle cx="45" cy="25" r="5"/><circle cx="45" cy="35" r="5"/><circle cx="45" cy="45" r="5"/>
+    <circle cx="55" cy="5" r="5"/>
+    <circle cx="65" cy="5" r="5"/><circle cx="65" cy="15" r="5"/>
+    <circle cx="75" cy="15" r="5"/><circle cx="75" cy="25" r="5"/><circle cx="75" cy="35" r="5"/><circle cx="75" cy="45" r="5"/>
+    <!-- O -->
+    <circle cx="95" cy="15" r="5"/><circle cx="95" cy="25" r="5"/><circle cx="95" cy="35" r="5"/>
+    <circle cx="105" cy="5" r="5"/><circle cx="105" cy="15" r="5"/><circle cx="105" cy="25" r="5"/><circle cx="105" cy="35" r="5"/><circle cx="105" cy="45" r="5"/>
+    <circle cx="115" cy="5" r="5"/><circle cx="115" cy="45" r="5"/>
+    <circle cx="125" cy="5" r="5"/><circle cx="125" cy="15" r="5"/><circle cx="125" cy="45" r="5"/>
+    <circle cx="135" cy="15" r="5"/><circle cx="135" cy="25" r="5"/><circle cx="135" cy="35" r="5"/>
+    <!-- A -->
+    <circle cx="155" cy="15" r="5"/><circle cx="155" cy="35" r="5"/><circle cx="155" cy="45" r="5"/>
+    <circle cx="165" cy="5" r="5"/><circle cx="165" cy="25" r="5"/><circle cx="165" cy="45" r="5"/>
+    <circle cx="175" cy="5" r="5"/><circle cx="175" cy="25" r="5"/><circle cx="175" cy="45" r="5"/>
+    <circle cx="185" cy="5" r="5"/><circle cx="185" cy="15" r="5"/><circle cx="185" cy="25" r="5"/><circle cx="185" cy="35" r="5"/>
+    <circle cx="195" cy="15" r="5"/><circle cx="195" cy="25" r="5"/><circle cx="195" cy="35" r="5"/><circle cx="195" cy="45" r="5"/>
+  </g>
+</svg>

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo-full.png" alt="moa - mixture of agents" width="360">
+  <img src="assets/logo-full-white.png" alt="moa - mixture of agents" width="360">
 </p>
 
 <p align="center">
