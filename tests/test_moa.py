@@ -354,25 +354,33 @@ def test_build_synthesis_prompt_ignores_failed() -> None:
 
 def test_render_block_ok() -> None:
     output = render_block(_ok("claude", "Claude says yes."))
-    assert "## claude (m) - OK - 1.0s" in output
+    # The label is centered inside a box-drawing rule, with blank lines around it.
+    assert "claude (m) · OK · 1.0s" in output
+    assert "─── claude (m) · OK · 1.0s ───" in output
+    assert "## " not in output
     assert "Claude says yes." in output
 
 
 def test_render_block_omits_model_when_empty() -> None:
     result = RunResult("opencode", "", "ok", "Hi.", "", 2.0, 0)
-    assert "## opencode - OK" in render_block(result)
+    assert "opencode · OK" in render_block(result)
 
 
 def test_render_block_failure_detail() -> None:
     result = RunResult("agy", "g", "timeout", "", "Timed out after 1s.", 1.0, None)
     output = render_block(result)
-    assert "## agy (g) - TIMEOUT" in output
+    assert "agy (g) · TIMEOUT" in output
     assert "Timed out after 1s." in output
+
+
+def test_render_block_blank_line_separation() -> None:
+    # Two leading blank lines front each block so streamed answers stay distinct.
+    assert render_block(_ok("claude", "hi")).startswith("\n\n─")
 
 
 def test_render_synthesis_block_no_mode_tag() -> None:
     output = render_synthesis_block(_ok("synthesis", "merged"), synthesizer="codex")
-    assert "## synthesis · via codex - OK" in output
+    assert "synthesis · via codex · OK" in output
     assert "(blind)" not in output and "(named)" not in output
 
 
@@ -486,7 +494,7 @@ def test_ask_is_council_no_synthesis(monkeypatch) -> None:
     runner = CliRunner()
     result = runner.invoke(cli.app, ["ask", "-p", "claude", "-p", "codex", "hi"])
     assert result.exit_code == 0
-    assert "## claude" in result.stdout and "## codex" in result.stdout
+    assert "claude (m) ·" in result.stdout and "codex (m) ·" in result.stdout
     assert "synthesis" not in result.stdout
 
 
@@ -502,11 +510,11 @@ def test_distill_runs_council_then_merges(monkeypatch) -> None:
     runner = CliRunner()
     result = runner.invoke(cli.app, ["distill", "-p", "claude", "-p", "codex", "hi"])
     assert result.exit_code == 0
-    assert "## claude" in result.stdout and "## codex" in result.stdout
-    assert "## synthesis · via claude" in result.stdout
+    assert "claude (m) ·" in result.stdout and "codex (m) ·" in result.stdout
+    assert "synthesis · via claude" in result.stdout
     assert "merged answer" in result.stdout
     # The merged block comes after both proposer blocks.
-    assert result.stdout.index("synthesis") > result.stdout.index("## codex")
+    assert result.stdout.index("synthesis") > result.stdout.index("codex (m) ·")
 
 
 def test_distill_aggregator_input_is_blind_and_shuffled(monkeypatch) -> None:
@@ -544,7 +552,7 @@ def test_distill_synthesizer_selection(monkeypatch) -> None:
     result = runner.invoke(cli.app, ["distill", "-p", "claude", "-p", "codex", "-s", "codex", "hi"])
     assert result.exit_code == 0
     assert captured["provider"] == "codex"
-    assert "## synthesis · via codex" in result.stdout
+    assert "synthesis · via codex" in result.stdout
 
 
 def test_distill_skips_with_fewer_than_two_successes(monkeypatch) -> None:
@@ -716,9 +724,9 @@ def test_debate_runs_rounds_then_judge(monkeypatch) -> None:
     assert result.exit_code == 0
     # 2 debaters (claude, codex) x 2 rounds + 1 judge (agy) = 5 calls.
     assert calls == ["claude", "codex", "claude", "codex", "agy"]
-    assert "## round 1 · claude" in result.stdout
-    assert "## round 2 · codex" in result.stdout
-    assert "## verdict · judge agy" in result.stdout
+    assert "round 1 · claude" in result.stdout
+    assert "round 2 · codex" in result.stdout
+    assert "verdict · judge agy" in result.stdout
     # The verdict comes last.
     assert result.stdout.index("verdict") > result.stdout.index("round 2")
 
@@ -1187,7 +1195,7 @@ def test_config_synthesizer_default_in_distill(monkeypatch, tmp_path) -> None:
     result = runner.invoke(cli.app, ["distill", "-p", "claude", "-p", "codex", "hi"])
     assert result.exit_code == 0
     # synthesizer=codex from config -> codex distills (not the auto default claude).
-    assert "## synthesis · via codex" in result.stdout
+    assert "synthesis · via codex" in result.stdout
 
 
 def test_flag_equal_to_default_still_beats_config(monkeypatch, tmp_path) -> None:

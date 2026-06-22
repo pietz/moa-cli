@@ -532,9 +532,25 @@ def build_judge_prompt(
 
 _STATUS_LABELS = {"ok": "OK", "failed": "FAILED", "timeout": "TIMEOUT", "missing": "MISSING"}
 
+# Width of the separator rule that fronts each answer block. Fixed (not terminal-
+# derived) so output is identical whether shown live or piped to a file.
+_RULE_WIDTH = 60
+
 
 def _status_label(status: str) -> str:
     return _STATUS_LABELS.get(status, status.upper())
+
+
+def _rule(label: str) -> str:
+    """A centered, box-drawing separator that names the block, e.g.
+    `──────── claude (opus) · OK · 2.3s ────────`. Falls back to the bare label
+    when it's wider than the rule."""
+    text = f" {label} "
+    if len(text) >= _RULE_WIDTH:
+        return text.strip()
+    pad = _RULE_WIDTH - len(text)
+    left = pad // 2
+    return "─" * left + text + "─" * (pad - left)
 
 
 def _body(result: RunResult) -> list[str]:
@@ -544,15 +560,21 @@ def _body(result: RunResult) -> list[str]:
     return ["```text", detail[-1200:], "```", ""]
 
 
+def _render(label: str, result: RunResult) -> str:
+    """A block: two leading blank lines, the named rule, a blank line, the body.
+    The leading blanks give each answer clear breathing room as blocks stream."""
+    return "\n".join(["", "", _rule(label), "", *_body(result)])
+
+
 def render_block(result: RunResult) -> str:
     model = f" ({result.model})" if result.model else ""
-    heading = f"## {result.provider}{model} - {_status_label(result.status)} - {result.elapsed:.1f}s"
-    return "\n".join([heading, "", *_body(result)])
+    label = f"{result.provider}{model} · {_status_label(result.status)} · {result.elapsed:.1f}s"
+    return _render(label, result)
 
 
 def render_synthesis_block(result: RunResult, synthesizer: str) -> str:
-    heading = f"## synthesis · via {synthesizer} - {_status_label(result.status)} - {result.elapsed:.1f}s"
-    return "\n".join([heading, "", *_body(result)])
+    label = f"synthesis · via {synthesizer} · {_status_label(result.status)} · {result.elapsed:.1f}s"
+    return _render(label, result)
 
 
 def result_record(result: RunResult) -> dict:
@@ -581,16 +603,16 @@ def synthesis_record(result: RunResult, synthesizer: str) -> dict:
 
 def render_debate_turn_block(result: RunResult, round_num: int) -> str:
     model = f" ({result.model})" if result.model else ""
-    heading = (
-        f"## round {round_num} · {result.provider}{model} - "
-        f"{_status_label(result.status)} - {result.elapsed:.1f}s"
+    label = (
+        f"round {round_num} · {result.provider}{model} · "
+        f"{_status_label(result.status)} · {result.elapsed:.1f}s"
     )
-    return "\n".join([heading, "", *_body(result)])
+    return _render(label, result)
 
 
 def render_judge_block(result: RunResult, judge: str) -> str:
-    heading = f"## verdict · judge {judge} - {_status_label(result.status)} - {result.elapsed:.1f}s"
-    return "\n".join([heading, "", *_body(result)])
+    label = f"verdict · judge {judge} · {_status_label(result.status)} · {result.elapsed:.1f}s"
+    return _render(label, result)
 
 
 def debate_turn_record(result: RunResult, round_num: int) -> dict:

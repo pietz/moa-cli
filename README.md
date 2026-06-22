@@ -169,7 +169,7 @@ The synthesizer default is persistable too (e.g. `moa config set synthesizer cod
 
 ### Output
 
-- **stdout** carries only content: each agent's answer as a Markdown block (`## claude (opus) - OK - 3.5s`), flushed the instant that agent finishes. `moa distill` then appends the merged block (`## synthesis · via claude - OK - ...`) once the aggregator finishes.
+- **stdout** carries only content: each agent's answer is fronted by a centered separator rule naming it (`──── claude (opus) · OK · 3.5s ────`) with blank lines around it for clear separation, flushed the instant that agent finishes. `moa distill` then appends the merged block (`──── synthesis · via claude · OK · ... ────`) once the aggregator finishes.
 - **stderr** carries progress and selection notes (`Asking claude, codex ...`), so piping stdout stays clean.
 - `--json` emits one JSON object per line (JSONL): a `{"type": "response", ...}` record per agent as it completes; `distill` then adds a `{"type": "synthesis", ...}` record. `debate` instead emits a `{"type": "debate_turn", "round": N, ...}` record per turn plus a final `{"type": "verdict", ...}` record. Ideal when another agent calls MOA and parses the result.
 
@@ -193,9 +193,9 @@ The aggregator prompt is adapted from the Mixture-of-Agents "Aggregate-and-Synth
 
 **The loop.** Round 1: debater A answers cold; debater B sees A's answer with an adversarial-stance instruction ("identify errors/weaknesses before giving your own answer; do not agree merely to reach consensus"). Each later round, every debater sees the other's latest answer and responds in the same spirit. If every debater signals it has *no substantive change* (it may open its reply with `NO SUBSTANTIVE CHANGE`), the debate stops early before the cap.
 
-**The judge.** A model that is **not** a debater reads the full transcript - presented **anonymized and order-shuffled** (a model is judging, so brand/position bias is killed, per item 002) - and writes the final answer. Its prompt instructs it to weigh correctness and evidence **above** confidence and fluency. The judge's verdict is the final block (`## verdict · judge <name> ...`).
+**The judge.** A model that is **not** a debater reads the full transcript - presented **anonymized and order-shuffled** (a model is judging, so brand/position bias is killed, per item 002) - and writes the final answer. Its prompt instructs it to weigh correctness and evidence **above** confidence and fluency. The judge's verdict is the final block (`──── verdict · judge <name> · ... ────`).
 
-**Streaming/output.** Each debater's turn streams as it completes (`## round N · <provider> ...`), then the judge's verdict last. `--json` emits a `{"type": "debate_turn", "round": N, ...}` record per turn plus a final `{"type": "verdict", ...}` record.
+**Streaming/output.** Each debater's turn streams as it completes (`──── round N · <provider> · ... ────`), then the judge's verdict last. `--json` emits a `{"type": "debate_turn", "round": N, ...}` record per turn plus a final `{"type": "verdict", ...}` record.
 
 **Safety.** Debaters and the judge run in the same read-only (or `--yolo`) mode as the other verbs - there is no permission bypass. agy's partial-sandbox caveat (shell only; it can still edit files) applies here too.
 
