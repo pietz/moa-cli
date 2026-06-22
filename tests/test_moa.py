@@ -10,6 +10,7 @@ from moa_cli.cli import (
     RunResult,
     build_synthesis_prompt,
     choose_synthesizer,
+    parse_model_overrides,
     render_block,
     render_synthesis_block,
     result_record,
@@ -36,30 +37,57 @@ def test_codex_command_uses_output_file_and_skip_git() -> None:
     assert cmd[-1] == "hello"
 
 
-def test_antigravity_command_pins_gemini_model() -> None:
+def test_agy_command_pins_gemini_model() -> None:
     # Regression: agy must get an explicit --model or it defaults to Gemini Flash.
-    cmd = PROVIDERS["antigravity"].build("hi", "Gemini 3.1 Pro (High)", None)
+    cmd = PROVIDERS["agy"].build("hi", "Gemini 3.1 Pro (High)", None)
     assert cmd == ["agy", "--model", "Gemini 3.1 Pro (High)", "-p", "hi"]
 
 
+def test_opencode_command_omits_model_when_empty() -> None:
+    # opencode has no universal default; an empty model means "skip -m".
+    assert PROVIDERS["opencode"].build("hi", "", None) == ["opencode", "run", "hi"]
+    cmd = PROVIDERS["opencode"].build("hi", "prov/model", None)
+    assert cmd == ["opencode", "run", "-m", "prov/model", "hi"]
+
+
 def test_select_for_run_takes_first_n_installed(monkeypatch) -> None:
-    installed = {"claude", "codex", "gemini", "agy"}
+    installed = {"claude", "codex", "agy", "opencode"}
     monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
-    chosen, skipped = select_for_run(2, None)
-    assert [p.name for p in chosen] == ["claude", "codex"]
-    assert skipped == []
+    assert [p.name for p in select_for_run(2, None)[0]] == ["claude", "codex"]
+    assert [p.name for p in select_for_run(3, None)[0]] == ["claude", "codex", "agy"]
+    assert [p.name for p in select_for_run(4, None)[0]] == ["claude", "codex", "agy", "opencode"]
 
 
 def test_select_for_run_skips_uninstalled_explicit(monkeypatch) -> None:
     monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe == "claude" else None)
-    chosen, skipped = select_for_run(3, ("claude", "gemini"))
+    chosen, skipped = select_for_run(3, ("claude", "opencode"))
     assert [p.name for p in chosen] == ["claude"]
-    assert skipped == ["gemini"]
+    assert skipped == ["opencode"]
 
 
 def test_select_for_run_rejects_unknown() -> None:
     with pytest.raises(ValueError):
         select_for_run(3, ("claude", "nope"))
+
+
+def test_select_for_run_excludes_before_taking_n(monkeypatch) -> None:
+    installed = {"claude", "codex", "agy", "opencode"}
+    monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
+    chosen, skipped = select_for_run(3, None, exclude=("claude",))
+    assert [p.name for p in chosen] == ["codex", "agy", "opencode"]
+    assert skipped == []
+
+
+def test_select_for_run_excludes_from_explicit(monkeypatch) -> None:
+    installed = {"claude", "codex", "agy", "opencode"}
+    monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
+    chosen, _ = select_for_run(3, ("claude", "codex"), exclude=("claude",))
+    assert [p.name for p in chosen] == ["codex"]
+
+
+def test_select_for_run_rejects_unknown_exclude() -> None:
+    with pytest.raises(ValueError):
+        select_for_run(3, None, exclude=("nope",))
 
 
 # --- runner -----------------------------------------------------------------
@@ -100,6 +128,63 @@ def test_run_provider_passes_devnull_stdin(monkeypatch) -> None:
     assert captured["stdin"] == asyncio.subprocess.DEVNULL
 
 
+# --- model overrides --------------------------------------------------------
+
+
+def test_parse_model_overrides_applies_one_keeps_defaults() -> None:
+    # Override only claude; other providers keep their PROVIDERS defaults.
+    models = parse_model_overrides(["claude=sonnet"])
+    assert models == {"claude": "sonnet"}
+    assert models.get("claude") == "sonnet"
+    assert models.get("codex") is None  # codex falls back to default_model
+
+
+def test_parse_model_overrides_multiple_with_spaces() -> None:
+    models = parse_model_overrides(["claude=sonnet", "agy=Gemini 3.1 Pro (Low)"])
+    assert models == {"claude": "sonnet", "agy": "Gemini 3.1 Pro (Low)"}
+
+
+def test_parse_model_overrides_none_is_empty() -> None:
+    assert parse_model_overrides(None) == {}
+
+
+def test_parse_model_overrides_rejects_missing_equals() -> None:
+    with pytest.raises(cli.typer.BadParameter):
+        parse_model_overrides(["claude"])
+
+
+def test_parse_model_overrides_rejects_unknown_provider() -> None:
+    with pytest.raises(cli.typer.BadParameter):
+        parse_model_overrides(["nope=x"])
+
+
+def test_run_provider_uses_override_model(monkeypatch) -> None:
+    # The override model must reach the spawned argv, not provider.default_model.
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["argv"] = list(args)
+        raise FileNotFoundError  # bail out early; we only care about argv
+
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(run_provider(PROVIDERS["claude"], "hi", timeout=5, model="sonnet"))
+    assert captured["argv"] == ["claude", "--model", "sonnet", "-p", "hi"]
+    assert result.model == "sonnet"
+
+
+def test_run_provider_defaults_model_when_no_override(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["argv"] = list(args)
+        raise FileNotFoundError
+
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(run_provider(PROVIDERS["claude"], "hi", timeout=5))
+    assert captured["argv"] == ["claude", "--model", "opus", "-p", "hi"]
+    assert result.model == "opus"
+
+
 # --- synthesis --------------------------------------------------------------
 
 
@@ -110,7 +195,7 @@ def _ok(provider: str, text: str) -> RunResult:
 def test_choose_synthesizer_modes() -> None:
     assert choose_synthesizer("auto", ["claude", "codex"]) == "claude"
     assert choose_synthesizer("first", ["codex", "claude"]) == "codex"
-    assert choose_synthesizer("random", ["gemini"], rng=random.Random(0)) == "gemini"
+    assert choose_synthesizer("random", ["agy"], rng=random.Random(0)) == "agy"
     assert choose_synthesizer("codex", ["claude", "codex"]) == "codex"
 
 
@@ -149,20 +234,21 @@ def test_render_block_ok() -> None:
 
 
 def test_render_block_omits_model_when_empty() -> None:
-    result = RunResult("antigravity", "", "ok", "Hi.", "", 2.0, 0)
-    assert "## antigravity - OK" in render_block(result)
+    result = RunResult("opencode", "", "ok", "Hi.", "", 2.0, 0)
+    assert "## opencode - OK" in render_block(result)
 
 
 def test_render_block_failure_detail() -> None:
-    result = RunResult("gemini", "g", "timeout", "", "Timed out after 1s.", 1.0, None)
+    result = RunResult("agy", "g", "timeout", "", "Timed out after 1s.", 1.0, None)
     output = render_block(result)
-    assert "## gemini (g) - TIMEOUT" in output
+    assert "## agy (g) - TIMEOUT" in output
     assert "Timed out after 1s." in output
 
 
-def test_render_synthesis_block_marks_mode() -> None:
-    output = render_synthesis_block(_ok("synthesis", "merged"), synthesizer="codex", blind=True)
-    assert "## synthesis · via codex (blind) - OK" in output
+def test_render_synthesis_block_no_mode_tag() -> None:
+    output = render_synthesis_block(_ok("synthesis", "merged"), synthesizer="codex")
+    assert "## synthesis · via codex - OK" in output
+    assert "(blind)" not in output and "(named)" not in output
 
 
 def test_result_record_shape() -> None:

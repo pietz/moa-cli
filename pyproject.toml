@@ -7,7 +7,7 @@ authors = [
     { name = "Paul-Louis Pröve", email = "plp@workgenius.com" }
 ]
 requires-python = ">=3.12"
-keywords = ["llm", "agents", "cli", "claude", "codex", "gemini", "peer-review"]
+keywords = ["llm", "agents", "cli", "claude", "codex", "agy", "opencode", "peer-review"]
 dependencies = [
     "typer>=0.25.0",
 ]

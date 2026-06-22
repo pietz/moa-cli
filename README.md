@@ -1,8 +1,16 @@
+<p align="center">
+  <img src="assets/logo-full.png" alt="moa - mixture of agents" width="360">
+</p>
+
+<p align="center">
+  <a href="https://github.com/pietz/moa-cli/actions/workflows/ci.yml"><img src="https://github.com/pietz/moa-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
+
 # MOA - Mixture of Agents
 
-Ask one question to multiple local AI coding CLIs **in parallel** and collect their answers. MOA detects which agent CLIs you have installed (Claude Code, Codex, Gemini CLI, Antigravity), fans your prompt out to them, and streams each answer back the moment that agent finishes. Optionally, it can synthesize the answers into a single unified response.
+Ask one question to multiple local AI coding CLIs **in parallel** and collect their answers. MOA detects which agent CLIs you have installed (Claude Code, Codex, agy, opencode), fans your prompt out to them, and streams each answer back the moment that agent finishes. Optionally, it can synthesize the answers into a single unified response.
 
-It's a drop-in, batteries-included replacement for hand-rolling parallel `claude -p` / `codex exec` / `gemini -p` calls (or a "peer review" agent skill): one command, clean attributed output, made to be called by a human **or** by another agent.
+It's a drop-in, batteries-included replacement for hand-rolling parallel `claude -p` / `codex exec` / `opencode run` calls (or a "peer review" agent skill): one command, clean attributed output, made to be called by a human **or** by another agent.
 
 The package is named `moa-cli` but installs the command `moa`.
 
@@ -27,9 +35,10 @@ A single model gives you one perspective. Asking three frontier models the same 
 moa doctor                                  # show which agent CLIs are installed
 moa ask "Should this feature use SQLite?"   # ask the top 3 installed agents
 moa ask -n 2 "..."                          # ask only the top 2 (priority order)
-moa ask -p claude -p gemini "..."           # pin specific agents
+moa ask -p claude -p agy "..."              # pin specific agents
+moa ask -x claude "..."                     # drop an agent (e.g. exclude the caller's own model)
+moa ask -m claude=sonnet "..."              # override which model a tool uses
 moa ask --synth "..."                       # also merge the answers into one
-moa ask --synth --blind "..."              # merge, but hide identities from the synthesizer
 moa ask --json "..."                        # machine-readable JSONL (for agents/pipes)
 git diff | moa ask -f - "Review this diff." # read the prompt from stdin
 ```
@@ -39,10 +48,31 @@ git diff | moa ask -f - "Review this diff." # read the prompt from stdin
 `-n/--num` (default 3) picks the first N **installed** agents from a popularity-ordered priority list:
 
 ```
-claude  →  codex  →  gemini  →  antigravity
+claude  ->  codex  ->  agy  ->  opencode
 ```
 
-So `moa ask -n 3` on a machine with all four installed asks Claude, Codex, and Gemini. Use `-p/--provider` (repeatable) to pin an exact set and ignore `-n`.
+So `moa ask -n 3` on a machine with all four installed asks Claude, Codex, and agy. Use `-p/--provider` (repeatable) to pin an exact set and ignore `-n`.
+
+Use `-x/--exclude` (repeatable) to drop one or more agents from the run. Exclusion is applied *before* `-n` takes the first N, and it also drops excluded names from an explicit `-p` set. It is off by default. The motivating case: an agent (e.g. Claude Code) calls `moa` for *other* opinions; `moa ask -x claude` makes sure one "peer" isn't just the caller's own model. So `moa ask -n 3 -x claude` asks Codex, agy, and opencode.
+
+### Choosing models
+
+Each tool ships with a reasonable default model, but you can override which model any tool uses with `-m/--model PROVIDER=MODEL` (repeatable). Only the providers you name change; the rest keep their defaults.
+
+```bash
+moa ask -m claude=sonnet -m agy="Gemini 3.1 Pro (Low)" "..."
+```
+
+The model-string format differs per tool and is passed through verbatim (the tool's own CLI validates it):
+
+| Provider   | Default                 | `-m` format                                            |
+| ---------- | ----------------------- | ------------------------------------------------------ |
+| `claude`   | `opus`                  | short id, e.g. `claude=sonnet`                         |
+| `codex`    | `gpt-5.5`               | model id, e.g. `codex=gpt-5.5`                         |
+| `agy`      | `Gemini 3.1 Pro (High)` | exact display name, e.g. `agy="Gemini 3.1 Pro (Low)"`  |
+| `opencode` | (tool's authed default) | `provider/model` slug, e.g. `opencode=anthropic/claude-sonnet-4` |
+
+`opencode` has no built-in default; without an override it omits `-m` and lets opencode pick. Pass `-m opencode=provider/model` to pin one.
 
 ### Output
 
@@ -56,18 +86,22 @@ So `moa ask -n 3` on a machine with all four installed asks Claude, Codex, and G
 
 - `auto` (default) - the highest-priority agent that ran (deterministic)
 - `random` - pick one of the agents that ran, at random
-- a provider name (`claude`, `codex`, `gemini`, `antigravity`)
+- a provider name (`claude`, `codex`, `agy`, `opencode`)
 
-With `--blind`, responses are shuffled and shown to the synthesizer as "Response A / B / C" with no provider names, so it can't favour a brand. The A→agent mapping is reported back to you (stderr, or `label_map` in JSON) so you keep full attribution.
+### Attribution policy
+
+The human (or agent) reading MOA's output **always gets correct attribution**: every response block shows the real provider name. There is no human-facing anonymization toggle.
+
+The synthesizer is a different story. To stop it picking favourites by brand, it **always** receives the proposer answers anonymized as "Response A / B / C" and order-shuffled. This is always-on internal behaviour, not a flag. The synthesized answer itself is brand-agnostic prose, and the A/B/C labels never leak into stdout, stderr, or the JSON.
 
 ## Supported agents
 
-| Provider      | CLI     | Invocation                                          |
-| ------------- | ------- | --------------------------------------------------- |
-| `claude`      | `claude`| `claude --model opus -p PROMPT`                     |
-| `codex`       | `codex` | `codex exec -m gpt-5.5 --skip-git-repo-check PROMPT`|
-| `gemini`      | `gemini`| `gemini -m gemini-3.1-pro-preview -p PROMPT`        |
-| `antigravity` | `agy`   | `agy --model "Gemini 3.1 Pro (High)" -p PROMPT`     |
+| Provider    | CLI        | Invocation                                          |
+| ----------- | ---------- | --------------------------------------------------- |
+| `claude`    | `claude`   | `claude --model opus -p PROMPT`                     |
+| `codex`     | `codex`    | `codex exec -m gpt-5.5 --skip-git-repo-check PROMPT`|
+| `agy`       | `agy`      | `agy --model "Gemini 3.1 Pro (High)" -p PROMPT`     |
+| `opencode`  | `opencode` | `opencode run PROMPT`                               |
 
 Adding a new agent is a single entry in the `PROVIDERS` table in `src/moa_cli/cli.py` (executable, default model, command builder); it then participates in detection, `-n` selection, and synthesis automatically.
 
@@ -78,9 +112,5 @@ uv sync
 uv run pytest
 uv run ruff check src tests
 ```
-
-## Related
-
-MOA is the local, terminal-native cousin of [moa.chat](https://moa.chat) - a hosted multi-model synthesis chat that adds frontier models, word-level answer attribution, and a consensus Venn view. This CLI stands on its own; moa.chat is there if you want the hosted experience.
 
 MIT licensed.

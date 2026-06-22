@@ -67,26 +67,33 @@ def _codex(prompt: str, model: str, out: str | None) -> list[str]:
     return cmd
 
 
-def _gemini(prompt: str, model: str, _out: str | None) -> list[str]:
-    return ["gemini", "-m", model, "-p", prompt]
-
-
-def _antigravity(prompt: str, model: str, _out: str | None) -> list[str]:
+def _agy(prompt: str, model: str, _out: str | None) -> list[str]:
     # agy also hosts Claude/GPT-OSS models, so we pin a Gemini model explicitly
     # to keep the panel diverse. Without --model it defaults to Gemini Flash.
     return ["agy", "--model", model, "-p", prompt]
 
 
+def _opencode(prompt: str, model: str, _out: str | None) -> list[str]:
+    # opencode has no universal default model (it depends on which provider the
+    # user has authed), so we omit -m when no model is given and let opencode
+    # pick its own default. The prompt is a positional arg.
+    cmd = ["opencode", "run"]
+    if model:
+        cmd += ["-m", model]
+    cmd.append(prompt)
+    return cmd
+
+
 PROVIDERS: dict[str, Provider] = {
     "claude": Provider("claude", "claude", "opus", _claude, unset_env=("CLAUDECODE",)),
     "codex": Provider("codex", "codex", "gpt-5.5", _codex, uses_output_file=True),
-    "gemini": Provider("gemini", "gemini", "gemini-3.1-pro-preview", _gemini),
-    "antigravity": Provider("antigravity", "agy", "Gemini 3.1 Pro (High)", _antigravity),
+    "agy": Provider("agy", "agy", "Gemini 3.1 Pro (High)", _agy),
+    "opencode": Provider("opencode", "opencode", "", _opencode),
 }
 
 # Auto-selection order, roughly by popularity. -n/--num walks this list and
 # takes the first N that are actually installed.
-PRIORITY: tuple[str, ...] = ("claude", "codex", "gemini", "antigravity")
+PRIORITY: tuple[str, ...] = ("claude", "codex", "agy", "opencode")
 
 
 def _installed(name: str) -> bool:
@@ -101,21 +108,26 @@ def missing_provider_names() -> list[str]:
     return [name for name in PRIORITY if not _installed(name)]
 
 
-def select_for_run(num: int, names: tuple[str, ...] | None) -> tuple[list[Provider], list[str]]:
+def select_for_run(
+    num: int, names: tuple[str, ...] | None, exclude: tuple[str, ...] = ()
+) -> tuple[list[Provider], list[str]]:
     """Pick providers to run, returning (to_run, skipped_because_not_installed).
 
     With an explicit `names` list we honour it in order, skipping any not
     installed. Otherwise we take the first `num` installed providers from
-    PRIORITY.
+    PRIORITY. Excluded providers are dropped before either path takes effect, so
+    `-n` counts only non-excluded installs and `-p` pins drop excluded names too.
     """
+    unknown = [name for name in (*(names or ()), *exclude) if name not in PROVIDERS]
+    if unknown:
+        raise ValueError(f"Unknown provider(s): {', '.join(unknown)}")
+    excluded = set(exclude)
     if names:
-        unknown = [name for name in names if name not in PROVIDERS]
-        if unknown:
-            raise ValueError(f"Unknown provider(s): {', '.join(unknown)}")
-        chosen = [PROVIDERS[name] for name in names if _installed(name)]
-        skipped = [name for name in names if not _installed(name)]
+        chosen = [PROVIDERS[name] for name in names if name not in excluded and _installed(name)]
+        skipped = [name for name in names if name not in excluded and not _installed(name)]
         return chosen, skipped
-    return [PROVIDERS[name] for name in available_provider_names()[:num]], []
+    available = [name for name in available_provider_names() if name not in excluded]
+    return [PROVIDERS[name] for name in available[:num]], []
 
 
 # --------------------------------------------------------------------------- #
@@ -164,8 +176,8 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
     await process.wait()
 
 
-async def run_provider(provider: Provider, prompt: str, timeout: float) -> RunResult:
-    model = provider.default_model
+async def run_provider(provider: Provider, prompt: str, timeout: float, model: str | None = None) -> RunResult:
+    model = model or provider.default_model
     out_file: str | None = None
     if provider.uses_output_file:
         handle, out_file = tempfile.mkstemp(prefix="moa-", suffix=".txt")
@@ -211,9 +223,14 @@ async def run_provider(provider: Provider, prompt: str, timeout: float) -> RunRe
                 pass
 
 
-async def stream(providers: list[Provider], prompt: str, timeout: float) -> AsyncIterator[RunResult]:
+async def stream(
+    providers: list[Provider], prompt: str, timeout: float, models: dict[str, str] | None = None
+) -> AsyncIterator[RunResult]:
     """Run every provider in parallel, yielding each result as it finishes."""
-    tasks = [asyncio.create_task(run_provider(p, prompt, timeout)) for p in providers]
+    models = models or {}
+    tasks = [
+        asyncio.create_task(run_provider(p, prompt, timeout, models.get(p.name))) for p in providers
+    ]
     for completed in asyncio.as_completed(tasks):
         yield await completed
 
@@ -312,9 +329,8 @@ def render_block(result: RunResult) -> str:
     return "\n".join([heading, "", *_body(result)])
 
 
-def render_synthesis_block(result: RunResult, synthesizer: str, blind: bool) -> str:
-    mode = "blind" if blind else "named"
-    heading = f"## synthesis · via {synthesizer} ({mode}) - {_status_label(result.status)} - {result.elapsed:.1f}s"
+def render_synthesis_block(result: RunResult, synthesizer: str) -> str:
+    heading = f"## synthesis · via {synthesizer} - {_status_label(result.status)} - {result.elapsed:.1f}s"
     return "\n".join([heading, "", *_body(result)])
 
 
@@ -331,12 +347,10 @@ def result_record(result: RunResult) -> dict:
     }
 
 
-def synthesis_record(result: RunResult, synthesizer: str, blind: bool, label_map: dict[str, str]) -> dict:
+def synthesis_record(result: RunResult, synthesizer: str) -> dict:
     return {
         "type": "synthesis",
         "synthesizer": synthesizer,
-        "blind": blind,
-        "label_map": label_map,
         "status": result.status,
         "elapsed": round(result.elapsed, 3),
         "text": result.stdout,
@@ -354,6 +368,27 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+
+def parse_model_overrides(entries: list[str] | None) -> dict[str, str]:
+    """Parse repeated `-m provider=model` flags into a {provider: model} dict.
+
+    Each entry must contain `=` and name a known provider. The model string is
+    passed through verbatim (formats differ per tool); the underlying CLI
+    validates it. Bad format or unknown provider raises BadParameter.
+    """
+    models: dict[str, str] = {}
+    for entry in entries or []:
+        if "=" not in entry:
+            raise typer.BadParameter(f"--model expects PROVIDER=MODEL, got: {entry!r}")
+        provider, model = entry.split("=", 1)
+        provider = provider.strip()
+        if provider not in PROVIDERS:
+            raise typer.BadParameter(
+                f"Unknown provider in --model: {provider!r}. Known: {', '.join(PROVIDERS)}."
+            )
+        models[provider] = model
+    return models
 
 
 def _read_prompt(prompt: str | None, file: Path | None) -> str:
@@ -380,9 +415,15 @@ def _emit(text: str) -> None:
     sys.stdout.flush()
 
 
-async def _collect(providers: list[Provider], prompt: str, timeout: float, json_output: bool) -> list[RunResult]:
+async def _collect(
+    providers: list[Provider],
+    prompt: str,
+    timeout: float,
+    json_output: bool,
+    models: dict[str, str] | None = None,
+) -> list[RunResult]:
     results: list[RunResult] = []
-    async for result in stream(providers, prompt, timeout):
+    async for result in stream(providers, prompt, timeout, models):
         results.append(result)
         _emit(json.dumps(result_record(result)) if json_output else render_block(result))
     return results
@@ -396,6 +437,14 @@ def ask(
         list[str] | None,
         typer.Option("--provider", "-p", help="Pin specific agent(s). Repeatable. Overrides --num."),
     ] = None,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option("--exclude", "-x", help="Drop agent(s) from the run. Repeatable."),
+    ] = None,
+    model: Annotated[
+        list[str] | None,
+        typer.Option("--model", "-m", help="Override a tool's model: PROVIDER=MODEL. Repeatable."),
+    ] = None,
     file: Annotated[Path | None, typer.Option("--file", "-f", help="Read the prompt from a file or '-' for stdin.")] = None,
     timeout: Annotated[float, typer.Option("--timeout", "-t", help="Per-agent timeout in seconds.")] = 180,
     synth: Annotated[bool, typer.Option("--synth", help="Also synthesize the answers into one unified answer.")] = False,
@@ -403,7 +452,6 @@ def ask(
         str,
         typer.Option("--synthesizer", help="Who synthesizes: auto | random | a provider name."),
     ] = "auto",
-    blind: Annotated[bool, typer.Option("--blind", help="Hide provider identities from the synthesizer.")] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSONL.")] = False,
 ) -> None:
     """Ask multiple agents in parallel; answers stream back as each one finishes."""
@@ -413,8 +461,12 @@ def ask(
     if num < 1:
         raise typer.BadParameter("--num must be at least 1.")
 
+    models = parse_model_overrides(model)
+
     try:
-        selected, skipped = select_for_run(num, tuple(provider) if provider else None)
+        selected, skipped = select_for_run(
+            num, tuple(provider) if provider else None, tuple(exclude) if exclude else ()
+        )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -425,13 +477,15 @@ def ask(
     note = f"Asking {', '.join(p.name for p in selected)} (timeout {timeout:g}s)"
     if skipped:
         note += f"; skipped (not installed): {', '.join(skipped)}"
+    if exclude:
+        note += f"; excluded: {', '.join(exclude)}"
     _note(note)
 
-    results = asyncio.run(_collect(selected, prompt_text, timeout, json_output))
+    results = asyncio.run(_collect(selected, prompt_text, timeout, json_output, models))
     successes = [r for r in results if r.status == "ok"]
 
     if synth:
-        _run_synthesis(prompt_text, results, successes, selected, synthesizer, blind, timeout, json_output)
+        _run_synthesis(prompt_text, results, successes, selected, synthesizer, timeout, json_output, models)
 
     if not successes:
         raise typer.Exit(code=1)
@@ -443,9 +497,9 @@ def _run_synthesis(
     successes: list[RunResult],
     selected: list[Provider],
     synthesizer: str,
-    blind: bool,
     timeout: float,
     json_output: bool,
+    models: dict[str, str] | None = None,
 ) -> None:
     if len(successes) < 2:
         _note("Synthesis skipped: need at least 2 successful responses.")
@@ -458,17 +512,18 @@ def _run_synthesis(
         _note(f"Synthesis skipped: {exc}")
         return
 
-    synth_prompt, label_map = build_synthesis_prompt(prompt_text, results, blind)
-    _note(f"Synthesizing with {synth_name} ({'blind' if blind else 'named'})...")
-    synth_result = asyncio.run(run_provider(PROVIDERS[synth_name], synth_prompt, timeout))
+    # Synthesis always anonymizes + shuffles its input so the synthesizer can't
+    # favour a brand. The A/B/C labels stay internal; the human already sees real
+    # names on the response blocks above.
+    synth_prompt, _label_map = build_synthesis_prompt(prompt_text, results, blind=True)
+    _note(f"Synthesizing with {synth_name}...")
+    synth_model = (models or {}).get(synth_name)
+    synth_result = asyncio.run(run_provider(PROVIDERS[synth_name], synth_prompt, timeout, synth_model))
 
     if json_output:
-        _emit(json.dumps(synthesis_record(synth_result, synth_name, blind, label_map)))
+        _emit(json.dumps(synthesis_record(synth_result, synth_name)))
     else:
-        _emit(render_synthesis_block(synth_result, synth_name, blind))
-        if blind and synth_result.status == "ok":
-            mapping = ", ".join(f"{tag}={name}" for tag, name in label_map.items())
-            _note(f"Blind labels: {mapping}")
+        _emit(render_synthesis_block(synth_result, synth_name))
 
 
 @app.command()
