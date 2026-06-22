@@ -16,10 +16,10 @@ agents. A reviewer confirmed `opencode` ran with full auto-approved file-edit + 
 - **`--yolo`** opt-in flag grants all tools full write access.
 - Keep it **uncluttered**: a structured per-provider permission map, not per-tool
   special-casing in the builders.
-- **Tools with no read-only mode (agy) still run by default** - they stay in the
-  panel (agy at priority #3) and run UNSCOPED (no read-only flag, since none works).
-  Do NOT exclude them and do NOT use config-file hacks. moa notes on stderr that
-  they aren't sandboxed so the user knows.
+- **agy still runs by default** at priority #3 with `--sandbox` (PARTIAL: blocks
+  shell/terminal, does NOT block its file-writing tool - next-best, not true
+  read-only). moa's stderr note states this honestly. Do NOT exclude agy or use
+  config-file hacks. `--yolo` drops `--sandbox`.
 
 ## Design: structured permission map
 
@@ -36,12 +36,14 @@ command before the prompt. `readonly is None` => the tool can't be sandboxed.
 | claude   | `--permission-mode plan` | `--permission-mode bypassPermissions` |
 | codex    | `-s read-only`  (NOT `-a` - rejected by `exec`) | `-s danger-full-access` |
 | opencode | `--agent plan` (+ pin `-m provider/model`) | default `build` agent |
-| agy      | **none exists** | default (full access) |
+| agy      | `--sandbox` (PARTIAL: shell only, file edits NOT blocked) | default (no sandbox) |
 
-- **agy:** no flag reliably sandboxes its file-writing tools (`--sandbox` only
-  restricts the terminal - verified). So `readonly = None` -> agy runs UNSCOPED but
-  STAYS in the panel (priority #3, included by default). moa emits a one-time stderr
-  note that agy isn't sandboxed. No pinning error, no exclusion.
+- **agy:** `--sandbox` restricts its terminal/shell but does NOT stop its
+  `write_file` tool (verified) - PARTIAL, not true read-only. As the next-best
+  option agy's default uses `--sandbox` (kills the shell vector); it STAYS in the
+  panel (priority #3). moa's stderr note states the partial protection honestly
+  ("shell-sandboxed but can still edit files"). `--yolo` drops `--sandbox`. No
+  pinning error, no exclusion.
 - **codex caveat:** `-s read-only` is a kernel sandbox that also blocks network, so codex
   won't do web research in default mode (it still reads local files). Acceptable for the patch.
 - The builder must **verify the `--yolo` flags live** before shipping.
