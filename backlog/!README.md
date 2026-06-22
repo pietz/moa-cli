@@ -71,9 +71,9 @@ Active tickets only; `done` items move to `archive/`.
 
 | ID  | Item                                          | Status   |
 |-----|-----------------------------------------------|----------|
-| 002 | Attribution policy (always named / blind synth) | ready    |
-| 003 | Self-exclusion / provider exclusion           | proposed |
-| 004 | Collaboration modes (council/synthesis/debate)| proposed |
-| 005 | Tool -> model mapping (defaults + override)   | proposed |
+| 004 | Collaboration modes (ask/distill/debate verbs)| ready    |
 | 006 | Vote mode                                     | parked   |
 | 007 | Agent skill for skills.sh (depends on 004)    | proposed |
+| 008 | Persistent config / default settings          | proposed |
+
+Archived (done, shipped in 0.1.0): 001 roster, 002 attribution, 003 exclusion, 005 model mapping.
