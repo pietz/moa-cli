@@ -2,7 +2,7 @@
 name: moa
 description: Get a second opinion from multiple AI models at once. Use this whenever you're stuck, want to validate an approach or design, pressure-test a plan or claim, or want diverse cross-model viewpoints on a hard decision - anything you'd reach for "peer review", "ask another model", or "council of models" for. Wraps the `moa` CLI, which fans one prompt out to the local agent CLIs (Claude Code, Codex, agy, opencode) in parallel and returns each answer with attribution.
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 ---
 
 # moa - mixture of agents
@@ -32,24 +32,27 @@ and needs no API keys of its own.
   and least reliably-beneficial mode; reach for it only when surfacing disagreement is the
   actual goal.
 
-## The two things to get right
-
-1. **Exclude yourself.** If *you* are an agent calling moa for *other* opinions, pass
-   `-x <your-provider>` so a "peer" isn't just you: Claude -> `claude`, Codex/GPT -> `codex`,
-   Gemini/agy -> `agy`. When in doubt, `moa doctor` shows which one is you.
-2. **Parse with `--json`.** `--json` emits one JSON object per line (JSONL) with a `status`
-   field per agent - the right output when an agent consumes the result. Without it, answers
-   print under a labelled heading on stdout and progress notes go to stderr (so piping stdout
-   stays clean). Prefer `--json` whenever you parse programmatically.
-
 ## How to prompt
 
 The CLIs are **stateless** - no memory of your conversation. Write a fully self-contained
 prompt every call: state the question, paste the relevant code/plan/diff, and say what a
-good answer looks like. Read prompts from a file or pipe with `-f PATH` (or `-f -` for stdin).
+good answer looks like.
+
+**Pass the prompt inline as the string argument** - that's the normal case, and it's all the
+context the panel ever receives. Don't write a temporary briefing file just to feed it in.
+Reserve `-f PATH` (or `-f -` for stdin) for piping *existing* content straight through, e.g.
+`git diff | moa ask -f - "Review this diff for bugs."` - not for a throwaway file you create
+for the occasion.
 
 Agents run **read-only by default**; pass `--yolo` only when you actually want the panel to
 change your working tree.
+
+## Parse with `--json`
+
+`--json` emits one JSON object per line (JSONL) with a `status` field per agent - the right
+output when an agent consumes the result. Without it, answers print under a labelled heading
+on stdout and progress notes go to stderr (so piping stdout stays clean). Prefer `--json`
+whenever you parse programmatically.
 
 ## Selecting the panel and config
 
@@ -59,11 +62,11 @@ overrides a model. Persist defaults with `moa config set ...` (e.g. `moa config 
 `moa config set exclude codex`) and inspect them with `moa config show`. Per-verb flags:
 `moa ask --help` / `moa distill --help` / `moa debate --help`.
 
-## Example (you are Claude, so you exclude yourself)
+## Example
 
 ```bash
-moa ask --json -x claude "I'm choosing between SQLite and flat Markdown files for ~10k \
-offline-first local notes with full-text search and Dropbox sync. Recommend one with tradeoffs."
+moa ask --json "I'm choosing between SQLite and flat Markdown files for ~10k offline-first \
+local notes with full-text search and Dropbox sync. Recommend one with tradeoffs."
 ```
 
 Report results the way a good peer review would: say which providers answered and which
