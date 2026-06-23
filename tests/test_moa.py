@@ -28,6 +28,15 @@ from moa_cli.cli import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_config(monkeypatch, tmp_path):
+    """Point every test at an empty, throwaway config dir so a developer's real
+    ~/.moa/config.toml can never leak in (e.g. an `exclude` there would silently
+    break selection tests). Tests that need specific config call _config_env(),
+    which re-points MOA_CONFIG_DIR at their own dir and thus overrides this."""
+    monkeypatch.setenv("MOA_CONFIG_DIR", str(tmp_path / "_moa_cfg"))
+
+
 # --- providers --------------------------------------------------------------
 
 
