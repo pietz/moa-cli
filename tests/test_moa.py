@@ -73,7 +73,7 @@ def test_opencode_command_omits_model_when_empty() -> None:
 
 def test_perm_args_readonly_vs_yolo_per_provider() -> None:
     # The permission argv is selected by mode, as data.
-    assert PROVIDERS["claude"].perm_args(yolo=False) == ("--permission-mode", "plan")
+    assert PROVIDERS["claude"].perm_args(yolo=False) == ("--permission-mode", "default")
     assert PROVIDERS["claude"].perm_args(yolo=True) == ("--permission-mode", "bypassPermissions")
     assert PROVIDERS["codex"].perm_args(yolo=False) == ("-s", "read-only")
     assert PROVIDERS["codex"].perm_args(yolo=True) == ("-s", "danger-full-access")
@@ -91,8 +91,8 @@ def test_perm_args_readonly_vs_yolo_per_provider() -> None:
 def test_build_splices_readonly_before_prompt() -> None:
     # Read-only flags land before the positional prompt for each tool.
     p = PROVIDERS
-    assert p["claude"].build("hi", "opus", None, ("--permission-mode", "plan"), ()) == [
-        "claude", "--model", "opus", "--permission-mode", "plan", "-p", "hi",
+    assert p["claude"].build("hi", "opus", None, ("--permission-mode", "default"), ()) == [
+        "claude", "--model", "opus", "--permission-mode", "default", "-p", "hi",
     ]
     codex_cmd = p["codex"].build("hi", "gpt-5.5", "/tmp/o.txt", ("-s", "read-only"), ())
     assert codex_cmd[codex_cmd.index("-s") + 1] == "read-only"
@@ -215,7 +215,7 @@ def test_run_provider_agy_claude_emit_no_effort_flag(monkeypatch) -> None:
     asyncio.run(run_provider(PROVIDERS["agy"], "hi", timeout=5, model="g", effort="high"))
     assert captured["argv"] == ["agy", "--sandbox", "--model", "g", "-p", "hi"]
     asyncio.run(run_provider(PROVIDERS["claude"], "hi", timeout=5, model="opus", effort="high"))
-    assert captured["argv"] == ["claude", "--model", "opus", "--permission-mode", "plan", "-p", "hi"]
+    assert captured["argv"] == ["claude", "--model", "opus", "--permission-mode", "default", "-p", "hi"]
 
 
 def test_select_for_run_takes_first_n_installed(monkeypatch) -> None:
@@ -348,8 +348,8 @@ def test_run_provider_uses_override_model(monkeypatch) -> None:
 
     monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
     result = asyncio.run(run_provider(PROVIDERS["claude"], "hi", timeout=5, model="sonnet"))
-    # Default mode is read-only, so the plan permission flags are spliced in.
-    assert captured["argv"] == ["claude", "--model", "sonnet", "--permission-mode", "plan", "-p", "hi"]
+    # moa's default run is read-only, so claude's --permission-mode flag is spliced in.
+    assert captured["argv"] == ["claude", "--model", "sonnet", "--permission-mode", "default", "-p", "hi"]
     assert result.model == "sonnet"
 
 
@@ -362,7 +362,7 @@ def test_run_provider_defaults_model_when_no_override(monkeypatch) -> None:
 
     monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
     result = asyncio.run(run_provider(PROVIDERS["claude"], "hi", timeout=5))
-    assert captured["argv"] == ["claude", "--model", "opus", "--permission-mode", "plan", "-p", "hi"]
+    assert captured["argv"] == ["claude", "--model", "opus", "--permission-mode", "default", "-p", "hi"]
     assert result.model == "opus"
 
 
@@ -378,7 +378,7 @@ def test_run_provider_readonly_by_default_argv(monkeypatch) -> None:
 
     asyncio.run(run_provider(PROVIDERS["claude"], "hi", timeout=5))
     assert "--permission-mode" in captured["argv"]
-    assert captured["argv"][captured["argv"].index("--permission-mode") + 1] == "plan"
+    assert captured["argv"][captured["argv"].index("--permission-mode") + 1] == "default"
 
     asyncio.run(run_provider(PROVIDERS["codex"], "hi", timeout=5, model="gpt-5.5"))
     assert "-s" in captured["argv"]
@@ -958,7 +958,7 @@ def test_debate_inherits_readonly_argv(monkeypatch) -> None:
     assert result.exit_code == 0
     # claude (debater) carries read-only flags.
     claude_argvs = [a for a in argvs if a and a[0] == "claude"]
-    assert claude_argvs and all("--permission-mode" in a and a[a.index("--permission-mode") + 1] == "plan" for a in claude_argvs)
+    assert claude_argvs and all("--permission-mode" in a and a[a.index("--permission-mode") + 1] == "default" for a in claude_argvs)
     # codex (debater) carries read-only flags.
     codex_argvs = [a for a in argvs if a and a[0] == "codex"]
     assert codex_argvs and all("read-only" in a for a in codex_argvs)
@@ -1430,7 +1430,7 @@ def test_config_show_includes_defaults_and_path(monkeypatch, tmp_path) -> None:
     assert str(cfg_file) in result.stdout
     assert "num = 2" in result.stdout
     # Defaults for unset keys still show.
-    assert "timeout = 600" in result.stdout
+    assert "timeout = 900" in result.stdout
     assert 'synthesizer = "auto"' in result.stdout
     assert 'moderator = "auto"' in result.stdout
 
@@ -1581,16 +1581,16 @@ def test_config_moderator_default_in_debate(monkeypatch, tmp_path) -> None:
 def test_flag_equal_to_default_still_beats_config(monkeypatch, tmp_path) -> None:
     # The Typer trap: an explicit flag whose value equals the built-in default
     # must still override the config. Options default to None when omitted, so
-    # `--timeout 600` (==default 600) is distinguishable from "omitted" and wins.
+    # `--timeout 900` (==default 900) is distinguishable from "omitted" and wins.
     _install_all(monkeypatch)
     _config_env(monkeypatch, tmp_path)
     (tmp_path / "config.toml").write_text("timeout = 120\n", encoding="utf-8")
     monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A")))
     runner = CliRunner()
-    result = runner.invoke(cli.app, ["ask", "-n", "1", "--timeout", "600", "hi"])
+    result = runner.invoke(cli.app, ["ask", "-n", "1", "--timeout", "900", "hi"])
     assert result.exit_code == 0
-    # The explicit 600 wins; config's 120 must not leak into the run.
-    assert "timeout 600s" in result.stderr
+    # The explicit 900 wins; config's 120 must not leak into the run.
+    assert "timeout 900s" in result.stderr
     assert "timeout 120s" not in result.stderr
 
 

@@ -143,7 +143,11 @@ def _opencode(
 PROVIDERS: dict[str, Provider] = {
     "claude": Provider(
         "claude", "claude", "opus", _claude,
-        readonly=("--permission-mode", "plan"),
+        # In headless `-p`, `default` keeps the full toolset (Read, read-only Bash
+        # like git/grep, WebFetch) but has no way to approve a write/edit, so
+        # mutations are denied: effectively read-only with all tools. (`plan` mode
+        # instead emits a plan-approval stub and never answers under `-p`.)
+        readonly=("--permission-mode", "default"),
         yolo=("--permission-mode", "bypassPermissions"),
         unset_env=("CLAUDECODE",),
     ),
@@ -754,7 +758,7 @@ _MODERATOR_MODES: tuple[str, ...] = ("auto",)
 # serialize_config renders them back as `[providers.<name>]` blocks.
 _CONFIG_DEFAULTS: dict = {
     "num": 3,
-    "timeout": 600.0,
+    "timeout": 900.0,
     "synthesizer": "auto",
     "moderator": "auto",
     "exclude": [],
@@ -1144,7 +1148,7 @@ def resolve_run(
         raise typer.BadParameter(f"{config_path()}: {exc}") from exc
 
     num = resolve_option(num, "num", config, default_num)
-    timeout = resolve_option(timeout, "timeout", config, 600.0)
+    timeout = resolve_option(timeout, "timeout", config, 900.0)
     # Repeatable flags are an empty list when omitted, not None, so treat empty
     # as "fall back to config" for exclude.
     exclude_names = tuple(exclude) if exclude else tuple(config.get("exclude", ()))

@@ -71,6 +71,7 @@ Active tickets only; `done` items move to `archive/`.
 
 | ID  | Item                                          | Status   |
 |-----|-----------------------------------------------|----------|
+| 013 | Strict read-only mode (`--read-only`)         | proposed |
 | 007 | Agent skill for skills.sh                     | proposed (unblocked: 004 done) |
 | 006 | Vote mode                                     | parked   |
 

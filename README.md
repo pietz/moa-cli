@@ -39,7 +39,7 @@ A single model gives you one perspective. Asking three frontier models the same 
 
 ```text
 $ moa ask "Is Postgres or SQLite better for a desktop app?"
-Asking claude, codex, agy (timeout 600s, read-only)
+Asking claude, codex, agy (timeout 900s, read-only)
 
 ──────────────── claude (opus) · OK · 3.2s ────────────────
 
@@ -92,10 +92,15 @@ is enforced by spawning each CLI with its own read-only flags:
 
 | Provider   | Read-only (default)        | Reads files | Web research              |
 | ---------- | -------------------------- | ----------- | ------------------------- |
-| `claude`   | `--permission-mode plan`   | yes         | yes                       |
+| `claude`   | `--permission-mode default` | yes        | yes                       |
 | `codex`    | `-s read-only`             | yes         | **no** (sandbox blocks network) |
 | `opencode` | `--agent plan`             | yes         | yes                       |
 | `agy`      | `--sandbox` (partial: shell only - can still edit files) | yes | yes |
+
+`claude`'s `--permission-mode default` is read-only in moa's non-interactive use: it reads
+files and researches online with the full toolset, but any write or edit needs an interactive
+approval that never comes under `-p`, so all mutations are denied. (`plan` mode is **not**
+usable headless - it emits a plan and waits for approval instead of answering.)
 
 `codex`'s read-only mode is a kernel sandbox that also blocks network, so codex does no
 web research in the default mode (it still reads local files). `agy` has **no true
