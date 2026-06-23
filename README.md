@@ -39,7 +39,7 @@ A single model gives you one perspective. Asking three frontier models the same 
 
 ```text
 $ moa ask "Is Postgres or SQLite better for a desktop app?"
-Asking claude, codex, agy (timeout 180s, read-only)
+Asking claude, codex, agy (timeout 600s, read-only)
 
 ──────────────── claude (opus) · OK · 3.2s ────────────────
 

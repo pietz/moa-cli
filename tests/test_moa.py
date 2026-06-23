@@ -1160,7 +1160,7 @@ def test_config_show_includes_defaults_and_path(monkeypatch, tmp_path) -> None:
     assert str(cfg_file) in result.stdout
     assert "num = 2" in result.stdout
     # Defaults for unset keys still show.
-    assert "timeout = 180" in result.stdout
+    assert "timeout = 600" in result.stdout
     assert 'synthesizer = "auto"' in result.stdout
     assert 'moderator = "auto"' in result.stdout
 
@@ -1310,16 +1310,16 @@ def test_config_moderator_default_in_debate(monkeypatch, tmp_path) -> None:
 def test_flag_equal_to_default_still_beats_config(monkeypatch, tmp_path) -> None:
     # The Typer trap: an explicit flag whose value equals the built-in default
     # must still override the config. Options default to None when omitted, so
-    # `--timeout 180` (==default 180) is distinguishable from "omitted" and wins.
+    # `--timeout 600` (==default 600) is distinguishable from "omitted" and wins.
     _install_all(monkeypatch)
     _config_env(monkeypatch, tmp_path)
     (tmp_path / "config.toml").write_text("timeout = 120\n", encoding="utf-8")
     monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A")))
     runner = CliRunner()
-    result = runner.invoke(cli.app, ["ask", "-n", "1", "--timeout", "180", "hi"])
+    result = runner.invoke(cli.app, ["ask", "-n", "1", "--timeout", "600", "hi"])
     assert result.exit_code == 0
-    # The explicit 180 wins; config's 120 must not leak into the run.
-    assert "timeout 180s" in result.stderr
+    # The explicit 600 wins; config's 120 must not leak into the run.
+    assert "timeout 600s" in result.stderr
     assert "timeout 120s" not in result.stderr
 
 

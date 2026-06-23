@@ -697,7 +697,7 @@ _MODERATOR_MODES: tuple[str, ...] = ("auto",)
 # The built-in defaults, shown by `config show` when a key isn't in the file.
 _CONFIG_DEFAULTS: dict = {
     "num": 3,
-    "timeout": 180.0,
+    "timeout": 600.0,
     "synthesizer": "auto",
     "moderator": "auto",
     "exclude": [],
@@ -1027,7 +1027,7 @@ def resolve_run(
         raise typer.BadParameter(f"{config_path()}: {exc}") from exc
 
     num = resolve_option(num, "num", config, default_num)
-    timeout = resolve_option(timeout, "timeout", config, 180.0)
+    timeout = resolve_option(timeout, "timeout", config, 600.0)
     # Repeatable flags are an empty list when omitted, not None, so treat empty
     # as "fall back to config" for exclude.
     exclude_names = tuple(exclude) if exclude else tuple(config.get("exclude", ()))
