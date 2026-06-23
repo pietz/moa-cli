@@ -72,9 +72,21 @@ Active tickets only; `done` items move to `archive/`.
 
 | ID  | Item                                          | Status   |
 |-----|-----------------------------------------------|----------|
+| 018 | Load config once per run in distill/debate    | ready    |
+| 017 | Deduplicate PROVIDER=VALUE parse-and-validate | ready    |
+| 016 | Direct test coverage for stream + _terminate  | ready    |
+| 015 | Gate PyPI releases on a passing test run      | ready    |
+| 014 | Fix stale permission-mode docs                | ready    |
 | 013 | Strict read-only mode (`--read-only`)         | proposed |
+| 012 | Capture per-run telemetry to ~/.moa           | proposed |
+| 010 | Live connection check for agents              | proposed |
 | 007 | Agent skill for skills.sh                     | proposed (unblocked: 004 done) |
 | 006 | Vote mode                                     | parked   |
+
+Suggested execution order for the ready batch: 015 (release gate) and 014 (docs) are
+independent and safe to ship first; 016 is additive coverage with no code change;
+017 and 018 are small refactors of `cli.py` - do them last and separately so their
+diffs stay small. None block each other.
 
 Archived (done): 001 roster, 002 attribution, 003 exclusion, 005 model mapping (0.1.0);
 009 read-only + --yolo, 004 collaboration verbs, 008 persistent config (0.2.0).

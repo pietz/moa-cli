@@ -9,9 +9,6 @@
 <p align="center">
   <a href="https://github.com/pietz/moa-cli/actions/workflows/ci.yml"><img src="https://github.com/pietz/moa-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://pypi.org/project/moa-cli/"><img src="https://img.shields.io/pypi/v/moa-cli.svg?label=pypi" alt="PyPI"></a>
-  <a href="https://pypi.org/project/moa-cli/"><img src="https://img.shields.io/pypi/pyversions/moa-cli.svg?label=python" alt="Python"></a>
-  <a href="https://pypi.org/project/moa-cli/"><img src="https://img.shields.io/pypi/l/moa-cli.svg" alt="MIT"></a>
-  <a href="https://pypi.org/project/moa-cli/"><img src="https://img.shields.io/pypi/dm/moa-cli.svg?label=downloads" alt="downloads"></a>
 </p>
 
 ---
@@ -76,9 +73,10 @@ Adding a new agent is a single entry in the `PROVIDERS` table in `src/moa_cli/pr
 ```
    round 1:  A answers cold
              B critiques A, then answers
-   round 2:  each sees the other's latest, responds again
-             moderator: DONE or CONTINUE?
-   verdict:  moderator reads the shuffled transcript, writes the final answer
+   ┌─ round k:  each sees the other's latest, responds in turn
+   │            moderator: DONE (converged) or CONTINUE?
+   └─ loops up to N rounds (default 2, hard max 4)
+   verdict:  moderator reads the full shuffled transcript, writes the final answer
 ```
 
 ## Example
@@ -133,20 +131,22 @@ MOA has three prompt verbs that share the same selection and output options:
 - **`moa debate PROMPT`** - sequential debate: two debaters answer and adversarially critique each other across rounds, with a moderator that checks for convergence between rounds and writes the final verdict. The costliest mode; read the caveats before reaching for it.
 
 ```bash
-moa doctor                                  # show installed CLIs and their default models
-moa ask "Should this feature use SQLite?"   # ask the top 3 installed agents (read-only)
-moa ask -n 2 "..."                          # ask only the top 2 (priority order)
-moa ask -p claude -p agy "..."              # pin specific agents
-moa ask -x claude "..."                     # drop an agent (e.g. exclude the caller's own model)
-moa ask -m claude=sonnet "..."              # override which model a tool uses
-moa ask --yolo "..."                        # grant full write access (default is read-only)
-moa ask --json "..."                        # machine-readable JSONL (for agents/pipes)
-git diff | moa ask -f - "Review this diff." # read the prompt from stdin
-moa distill "Design a rate limiter."        # council, then merge into one answer
-moa distill -s codex "..."                  # pick who distills (auto | random | provider)
-moa debate "Is this race condition real?"   # 2 debaters; the first also moderates (default 2 agents)
-moa debate -r 3 "..."                        # more rounds (default 2, hard max 4)
-moa debate --moderator agy "..."             # pin a neutral moderator (a non-debater)
+moa doctor                                  # run this first: which agent CLIs can moa find?
+
+# The three collaboration modes (read-only by default):
+moa ask "Should this feature use SQLite?"   # council: top 3 agents answer in parallel
+moa distill "Design a rate limiter."        # council, then one merged answer
+moa debate "Is this race condition real?"   # adversarial rounds + moderator verdict
+
+# Built for agents to call agents:
+moa ask --json -x claude "Review this plan."  # exclude yourself + emit JSONL
+git diff | moa ask -f - "Review this diff."   # read the prompt from stdin
+
+# Tune the panel:
+moa ask -n 2 "..."              # only the top 2 (priority order)
+moa ask -p claude -p agy "..."  # pin an exact set
+moa ask -m claude=sonnet "..."  # override a tool's model
+moa ask --yolo "..."            # allow file edits and shell (default is read-only)
 ```
 
 The shared options (`-n/--num`, `-p/--provider`, `-x/--exclude`, `-m/--model`, `-t/--timeout`, `-f/--file`, `--json`, `--yolo`) work identically on all three verbs. `distill` adds `-s/--synthesizer`; `debate` adds `-r/--rounds` and `--moderator`.
@@ -162,9 +162,7 @@ MOA is built to be called autonomously, so by default **no agent can write files
 | `opencode` | `--agent plan`             | yes         | yes                       |
 | `agy`      | `--sandbox` (partial: shell only - can still edit files) | yes | yes |
 
-`claude`'s `--permission-mode default` is read-only in moa's non-interactive use: it reads files and researches online with the full toolset, but any write or edit needs an interactive approval that never comes under `-p`, so all mutations are denied. (`plan` mode is **not** usable headless - it emits a plan and waits for approval instead of answering.)
-
-`codex`'s read-only mode is a kernel sandbox that also blocks network, so codex does no web research in the default mode (it still reads local files). `agy` has **no true read-only mode**: its `--sandbox` flag restricts agy's terminal/shell but does **not** stop its `write_file` tool, so agy **can still edit files** even in the default mode. This is **partial** protection (it closes the shell vector only), not read-only. moa applies `--sandbox` as the next-best safeguard and the selection note on stderr states honestly that `agy` is shell-sandboxed but can still edit files.
+`agy` has no true read-only mode - its `--sandbox` only restricts the shell, not its `write_file` tool (see *Honesty & caveats*). Per-tool nuances (why claude's `default` is read-only headless, why codex blocks network) and the full sandbox reference: [`docs/cli-permission-modes.md`](docs/cli-permission-modes.md).
 
 ### `--yolo` (full write access)
 
@@ -174,8 +172,6 @@ Pass `--yolo` to grant every agent full write access (file edits and shell comma
 moa ask --yolo "Refactor this module and run the tests."
 ```
 
-Under `--yolo` every agent gets full write access. For `agy` this means dropping `--sandbox`, so `agy --yolo` runs with no shell restrictions at all. In the default mode, `agy` runs with `--sandbox` (partial protection: shell only - it can still edit files), and MOA states that honestly on stderr.
-
 ### How agents are selected
 
 `-n/--num` (default 3) picks the first N **installed** agents from a popularity-ordered priority list:
@@ -184,7 +180,7 @@ Under `--yolo` every agent gets full write access. For `agy` this means dropping
 claude  ->  codex  ->  agy  ->  opencode
 ```
 
-So `moa ask -n 3` on a machine with all four installed asks Claude, Codex, and agy (opencode is #4). `agy` has no true read-only mode, so in the default mode it runs with `--sandbox` (partial protection: shell only - it can still edit files) and MOA flags that with an honest note on stderr; it is **not** excluded. Use `-p/--provider` (repeatable) to pin an exact set and ignore `-n`.
+So `moa ask -n 3` on a machine with all four installed asks Claude, Codex, and agy (opencode is #4). Use `-p/--provider` (repeatable) to pin an exact set and ignore `-n`.
 
 Use `-x/--exclude` (repeatable) to drop one or more agents from the run. Exclusion is applied *before* `-n` takes the first N, and it also drops excluded names from an explicit `-p` set. It is off by default. The motivating case: an agent (e.g. Claude Code) calls `moa` for *other* opinions; `moa ask -x claude` makes sure one "peer" isn't just the caller's own model. So `moa ask -n 3 -x claude` asks Codex, agy, and opencode.
 
@@ -209,71 +205,19 @@ The model-string format differs per tool and is passed through verbatim (the too
 
 ### Configuration
 
-To avoid repeating the same flags on every call, persist your own defaults in a config file. MOA reads it for every verb and merges it under your flags.
-
-**Location.** `~/.moa/config.toml` (the dir is created on first write). Set `$MOA_CONFIG_DIR` to point the whole config layer somewhere else (useful in tests/CI).
-
-**Precedence.** `built-in default  <  config file  <  CLI flag`. A flag always wins; the config file only changes a default when that flag is omitted; an absent file means today's built-in behaviour.
-
-**Keys** (all shared across `ask`/`distill`/`debate`):
-
-| Key                | Type                     | Example                       |
-| ------------------ | ------------------------ | ----------------------------- |
-| `num`              | int (>= 1)               | `num = 2`                     |
-| `timeout`          | seconds (> 0)            | `timeout = 120`               |
-| `exclude`          | list of provider names   | `exclude = ["claude"]`        |
-| `synthesizer`      | `auto`/`random`/provider | `synthesizer = "codex"`       |
-| `[providers.<name>]` | per-provider `model` + `effort` | see below              |
-| `[models]`         | DEPRECATED provider -> model table | `claude = "sonnet"` |
+Persist your own defaults at `~/.moa/config.toml` so you don't repeat flags. Precedence is `built-in default < config file < CLI flag`; an absent file means today's behaviour. Set `$MOA_CONFIG_DIR` to relocate it.
 
 ```toml
 # ~/.moa/config.toml
 num = 2
-timeout = 120
 exclude = ["claude"]
-synthesizer = "auto"
 
 [providers.codex]
 model = "gpt-5.5"
 effort = "high"
-
-[providers.opencode]
-model = "zai-coding-plan/glm-5.2"
-effort = "high"
 ```
 
-Model and effort are grouped per provider under `[providers.<name>]`. The flat `[models]` table still works as a **deprecated alias** for `[providers.<name>].model`; when both set a model for the same provider, the `[providers.<name>]` block wins (MOA prints a one-line note, not an error).
-
-**`moa config`** inspects and edits the file (it creates the dir/file as needed and validates provider names):
-
-```bash
-moa config show                       # effective config (defaults + file) + path
-moa config path                       # print the config file path
-moa config set num 2                  # set a scalar
-moa config set exclude claude,codex   # set the exclude list (comma-separated)
-moa config set model codex=gpt-5.5    # set a provider's model
-moa config set effort codex=high      # set a provider's reasoning effort
-moa config unset num                  # remove a key
-moa config unset model codex          # remove one provider's model
-moa config unset effort codex         # remove one provider's effort
-```
-
-The role defaults are persistable too: the distill `synthesizer` and the debate `moderator` (e.g. `moa config set synthesizer codex`, `moa config set moderator agy`). `debate`'s `-r/--rounds` is not persisted. CLI `-m` overrides win per-provider over the config model.
-
-#### Reasoning / effort
-
-Pin a per-provider **reasoning/effort** level in config so the council runs each tool at the depth you want without repeating flags. This is **config-only**: there is intentionally no `-e/--effort` CLI flag.
-
-MOA uses **raw pass-through with zero value mapping.** It does not normalize effort across providers or invent a canonical low/med/high scale. You write the **exact value the target tool expects**, and MOA pastes it verbatim into that provider's native flag. The only thing MOA maps is *where* the value lands in each provider's argv, never the value itself:
-
-| Provider   | `effort` lands in                    | Notes                                                       |
-| ---------- | ------------------------------------ | ----------------------------------------------------------- |
-| `codex`    | `-c model_reasoning_effort=<value>`  | generic config override                                     |
-| `opencode` | `--variant <value>`                  | opencode's "model variant (provider-specific reasoning effort)" |
-| `agy`      | (none)                               | reasoning is part of the model name, e.g. `Gemini 3.1 Pro (High)` |
-| `claude`   | (none)                               | no per-call effort flag                                     |
-
-Values are **tool-specific and not validated** by MOA (only "non-empty if present"): a value the target tool rejects fails at that tool, not in MOA. When no effort is configured for a provider, MOA passes **no effort flag at all**, so the tool's own default stands. Setting `effort` for `agy`/`claude` is stored but inert (they have no effort flag); MOA notes this when you set it.
+Keys are shared across all verbs (`num`, `timeout`, `exclude`, `synthesizer`, `moderator`, and `[providers.<name>]` with `model`/`effort`). Edit them with `moa config set ...` / `moa config show`, or just write the TOML. See [`docs/configuration.md`](docs/configuration.md) for the full key reference, the `moa config` command list, and the per-provider reasoning/effort mapping.
 
 ### Output
 
@@ -285,29 +229,11 @@ Values are **tool-specific and not validated** by MOA (only "non-empty if presen
 
 ### `moa distill` (synthesis)
 
-`distill` runs the same council fan-out as `ask`, then one more pass where a strong aggregator merges the collected answers into a single, unified answer. **It returns only that merged answer** - the individual proposer responses are intermediates and are not printed (each one's arrival is noted on stderr so the wait isn't silent). It needs at least two successful proposer answers; with fewer it skips the merge and says so on stderr. The aggregator is chosen with `-s/--synthesizer`:
+Runs the same council as `ask`, then one strong aggregator merges the answers into a single unified answer. **It returns only the merged answer** - proposer responses are intermediates (their arrival is noted on stderr). It needs at least two successful proposers, or it skips the merge and says so. Pick the aggregator with `-s/--synthesizer` (`auto` = highest-priority that ran, `random`, or a provider name).
 
-- `auto` (default) - the highest-priority agent that ran (deterministic)
-- `random` - pick one of the agents that ran, at random
-- a provider name (`claude`, `codex`, `agy`, `opencode`)
+### `moa debate` (adversarial + moderator)
 
-The aggregator prompt is adapted from the Mixture-of-Agents "Aggregate-and-Synthesize" prompt (Wang et al. 2024): it tells the aggregator to critically evaluate the inputs (some may be biased or incorrect) and not to simply replicate them but offer a refined, accurate, comprehensive reply.
-
-### `moa debate` (sequential debate + moderator)
-
-`debate` is the opt-in, highest-cost mode. Instead of fanning out in parallel, it runs a sequential, adversarial exchange overseen by a **moderator** that checks for convergence between rounds and writes the final answer.
-
-**Roles.** The top **2** selected agents are the debaters. The **moderator** runs the per-round convergence check and writes the verdict; by default it is the top-priority selected agent (so the default 2-agent debate has agent #1 also moderate). Debate only needs **2 agents**; with fewer it exits cleanly rather than silently degrading. For a **neutral** moderator that doesn't also debate, select a third agent and pin it: `moa debate -n 3 --moderator <provider>` (the moderator must be one of the selected agents). The moderator only ever sees the transcript **anonymized + shuffled**, so even when it is itself a debater it can't favour its own answer.
-
-**Rounds.** `-r/--rounds` defaults to **2** (gains plateau around 2-3 rounds while token cost grows multiplicatively) and is hard-capped at **4** - higher values are clamped with a warning on stderr.
-
-**The loop.** Round 1: debater A answers cold; debater B sees A's answer with an adversarial-stance instruction ("identify errors/weaknesses before giving your own answer; do not agree merely to reach consensus"). Each later round, every debater sees the other's latest answer and responds in the same spirit. After each non-final round the **moderator** reads the debaters' latest answers and replies `DONE` (they've converged or fully aired their disagreement) or `CONTINUE`; a `DONE` stops the debate before the cap.
-
-**The verdict.** The moderator reads the full transcript - presented **anonymized and order-shuffled** (so brand/position bias is killed, even when the moderator was a debater) - and writes the final answer. Its prompt instructs it to weigh correctness and evidence **above** confidence and fluency. The verdict is the final block (`──── verdict · moderator <name> · ... ────`).
-
-**Streaming/output.** Each debater's turn streams as it completes (`──── round N · <provider> · ... ────`), then the moderator's verdict last. `--json` emits a `{"type": "debate_turn", "round": N, ...}` record per turn plus a final `{"type": "verdict", "moderator": "<name>", ...}` record.
-
-**Safety.** Debaters and the moderator run in the same read-only (or `--yolo`) mode as the other verbs - there is no permission bypass. agy's partial-sandbox caveat (shell only; it can still edit files) applies here too.
+Two debaters critique each other across rounds while a moderator checks for convergence and writes the final verdict. The transcript is anonymized and shuffled before the moderator sees it, so brand and position bias can't steer the verdict. Needs 2 agents; `-r/--rounds` (default 2, max 4) and `--moderator` tune it. It's the costliest and least reliably beneficial mode - reach for it only to surface disagreement (see *Honesty & caveats*). Full roles, loop, and output format: [`docs/debate.md`](docs/debate.md).
 
 ### Attribution policy
 
