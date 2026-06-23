@@ -31,6 +31,11 @@ gaps in reasoning. Do NOT agree merely to reach consensus - only concede a point
 genuinely correct. Then give your own best, complete answer to the original question, \
 incorporating any valid corrections."""
 
+DEBATER_OPENING_INSTRUCTION = """This is the opening move of a debate: another \
+participant will critique your answer next, so take a clear, specific position on the \
+question and justify it. A vague, hedging, or one-word answer gives them nothing \
+meaningful to engage with. Give your best, complete answer."""
+
 MODERATOR_VERDICT_PROMPT = """You are the moderator of this debate. Below is a transcript of a \
 debate between AI coding assistants who answered the user's question and then critiqued each \
 other's answers across several rounds. The participants are anonymized and presented in \
@@ -52,12 +57,21 @@ asserted.
 CONVERGENCE_DONE = "DONE"
 
 MODERATOR_CONVERGENCE_PROMPT = """You are the moderator of this debate. Below are the debaters' \
-latest answers to the user's question, anonymized. Decide whether they have converged on an \
-answer, or at least fully aired and clarified their disagreement, so that another round would \
-add nothing material.
+latest answers to the user's question, anonymized. Decide whether the debate has converged: \
+every participant has given a substantive answer AND they now either agree on a conclusion, or \
+have fully and clearly stated an irreconcilable disagreement along with their reasons.
 
-Reply with EXACTLY one word on the first line: DONE if the debate should stop now, or CONTINUE \
-if another round would materially improve the final answer. Add nothing else."""
+Default to CONTINUE. Reply CONTINUE if any of these hold:
+- Any participant has not substantively engaged (a bare yes/no, a trivial or contentless \
+reply, or no real justification).
+- A participant's reasoning, evidence, or core position is still unclear, shifting, or \
+not yet addressed by the other side.
+- Another round could materially sharpen, correct, or deepen the answers.
+
+Reply DONE only when the participants have genuinely engaged throughout and a further round \
+would merely repeat what is already on the table.
+
+Reply with EXACTLY one word on the first line: DONE or CONTINUE. Add nothing else."""
 
 
 def choose_synthesizer(
@@ -125,7 +139,10 @@ def assign_debate_roles(
         )
     debaters = selected[:2]
     if moderator in (None, "auto"):
-        return debaters, selected[0]
+        # Prefer a neutral moderator (a third selected agent that doesn't debate);
+        # with only two agents, the top-priority one moderates its own debate.
+        moderator_provider = selected[2] if len(selected) >= 3 else selected[0]
+        return debaters, moderator_provider
 
     names = [provider.name for provider in selected]
     if moderator not in PROVIDERS:
@@ -155,7 +172,11 @@ def clamp_rounds(rounds: int) -> tuple[int, str | None]:
 
 def build_debate_turn_prompt(question: str, prior: list[tuple[str, str]]) -> str:
     if not prior:
-        return f"## Question\n\n{question}\n\n## Your answer\n"
+        return (
+            f"## Question\n\n{question}\n\n"
+            f"## Instruction\n\n{DEBATER_OPENING_INSTRUCTION}\n\n"
+            "## Your answer\n"
+        )
     others = "\n\n".join(f"### {label}\n\n{text.strip()}" for label, text in prior)
     return (
         f"## Question\n\n{question}\n\n"

@@ -225,6 +225,7 @@ Keys are shared across all verbs (`num`, `timeout`, `exclude`, `synthesizer`, `m
 
 - **stdout** carries only content. In a terminal, each agent's answer is fronted by a centered box-drawing rule naming it (`──── claude (opus) · OK · 3.5s ────`) with blank lines for separation, flushed the instant that agent finishes. When stdout is **piped or read by an agent** (not a TTY), the same block renders as a plain, low-noise `## claude (opus) · OK · 3.5s` heading instead - no box-drawing. `moa distill` emits only the final merged block.
 - **stderr** carries progress and selection notes (`Asking claude, codex ...`), so piping stdout stays clean.
+- **Live status line.** On a TTY, stderr shows an in-place spinner naming each in-flight agent and model with an elapsed timer (`⠋ claude (opus) 3.1s   ⠙ codex (gpt-5.5) 3.1s`) while they work, clearing the instant each answer lands. Off a TTY (piped, logged, or read by an agent) it is a strict no-op, so machine-readable output is byte-identical to a run with no status line.
 - `--json` emits one JSON object per line (JSONL): `ask` writes a `{"type": "response", ...}` record per agent as it completes; `distill` writes a single `{"type": "synthesis", ...}` record (only the merged answer); `debate` writes a `{"type": "debate_turn", "round": N, ...}` record per turn plus a final `{"type": "verdict", ...}` record. Ideal when another agent calls MOA and parses the result.
 
 ## Modes in depth

@@ -16,14 +16,16 @@ checks for convergence between rounds and writes the final answer.
 ## Roles
 
 The top **2** selected agents are the debaters. The **moderator** runs the
-per-round convergence check and writes the verdict; by default it is the
-top-priority selected agent (so the default 2-agent debate has agent #1 also
-moderate). Debate only needs **2 agents**; with fewer it exits cleanly rather
-than silently degrading. For a **neutral** moderator that doesn't also debate,
-select a third agent and pin it: `moa debate -n 3 --moderator <provider>` (the
-moderator must be one of the selected agents). The moderator only ever sees the
-transcript **anonymized + shuffled**, so even when it is itself a debater it
-can't favour its own answer.
+per-round convergence check and writes the verdict. By default the moderator is
+**neutral**: when 3+ agents are selected, the third one moderates (it doesn't
+debate, so it isn't judging its own answer). With only 2 agents available, the
+top-priority one moderates its own debate. Pin a specific moderator with
+`--moderator <provider>` (it must be one of the selected agents). The moderator
+only ever sees the transcript **anonymized + shuffled**, so even when it is
+itself a debater it can't favour its own answer.
+
+Debate only needs **2 agents**; with fewer it exits cleanly rather than silently
+degrading.
 
 ## Rounds
 
@@ -33,13 +35,16 @@ clamped with a warning on stderr.
 
 ## The loop
 
-Round 1: debater A answers cold; debater B sees A's answer with an
-adversarial-stance instruction ("identify errors/weaknesses before giving your
-own answer; do not agree merely to reach consensus"). Each later round, every
-debater sees the other's latest answer and responds in the same spirit. After
-each non-final round the **moderator** reads the debaters' latest answers and
-replies `DONE` (they've converged or fully aired their disagreement) or
-`CONTINUE`; a `DONE` stops the debate before the cap.
+Round 1: debater A answers cold (a stance instruction asks for a clear, justified
+position so the opening turn isn't a contentless one-word reply); debater B sees
+A's answer with an adversarial-stance instruction ("identify errors/weaknesses
+before giving your own answer; do not agree merely to reach consensus"). Each
+later round, every debater sees the other's latest answer and responds in the
+same spirit. After each non-final round the **moderator** reads the debaters'
+latest answers and replies `DONE` (they've genuinely converged, or fully and
+clearly stated an irreconcilable disagreement) or `CONTINUE` (the default -
+including when any answer was non-substantive); a `DONE` stops the debate before
+the cap.
 
 ## The verdict
 

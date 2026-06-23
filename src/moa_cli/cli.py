@@ -28,6 +28,7 @@ from .config import (
     write_config,
 )
 from .execution import Status, RunResult, run_provider, stream
+from .status import StatusLine
 from .output import (
     debate_turn_record,
     emit as _emit,
@@ -164,22 +165,65 @@ async def _collect(
     emit_blocks: bool = True,
     efforts: dict[str, str] | None = None,
 ) -> list[RunResult]:
+    resolved_models = models or {}
+    status = StatusLine()
+    for provider in providers:
+        model = resolved_models.get(provider.name) or provider.default_model
+        status.add(provider.name, _call_label("", provider.name, model))
+    status.start()
     results: list[RunResult] = []
-    async for result in stream(providers, prompt, timeout, models, yolo, efforts):
-        results.append(result)
-        if emit_blocks:
-            output = (
-                json.dumps(result_record(result))
-                if json_output
-                else render_block(result)
-            )
-            _emit(output)
-        else:
-            _note(
-                f"  {result.provider} responded "
-                f"({_status_label(result.status)}, {result.elapsed:.1f}s)"
-            )
+    try:
+        async for result in stream(
+            providers, prompt, timeout, resolved_models, yolo, efforts
+        ):
+            results.append(result)
+            status.clear()
+            if emit_blocks:
+                output = (
+                    json.dumps(result_record(result))
+                    if json_output
+                    else render_block(result)
+                )
+                _emit(output)
+            elif not status.active:
+                # Off a TTY there is no spinner, so log each arrival on stderr.
+                _note(
+                    f"  {result.provider} responded "
+                    f"({_status_label(result.status)}, {result.elapsed:.1f}s)"
+                )
+            status.remove(result.provider)
+    finally:
+        await status.stop()
     return results
+
+
+def _call_label(what: str, name: str, model: str) -> str:
+    base = f"{name} ({model})" if model else name
+    return f"{what} · {base}" if what else base
+
+
+def _progress_note(message: str) -> None:
+    """A 'work is starting' note. On a TTY the live status line replaces it."""
+    if not sys.stderr.isatty():
+        _note(message)
+
+
+async def _run_with_status(
+    provider: Provider,
+    prompt: str,
+    timeout: float,
+    model: str | None,
+    yolo: bool,
+    effort: str | None,
+    label: str,
+) -> RunResult:
+    status = StatusLine()
+    status.add(provider.name, label)
+    status.start()
+    try:
+        return await run_provider(provider, prompt, timeout, model, yolo, effort)
+    finally:
+        await status.stop()
 
 
 PromptArg = Annotated[
@@ -429,15 +473,17 @@ def _run_synthesis(
         return None
 
     synth_prompt, _label_map = build_synthesis_prompt(cfg.prompt, results, blind=True)
-    _note(f"Distilling with {synth_name}...")
+    synth_model = cfg.models.get(synth_name) or PROVIDERS[synth_name].default_model
+    _progress_note(f"Distilling with {synth_name}...")
     synth_result = asyncio.run(
-        run_provider(
+        _run_with_status(
             PROVIDERS[synth_name],
             synth_prompt,
             cfg.timeout,
             cfg.models.get(synth_name),
             cfg.yolo,
             cfg.efforts.get(synth_name),
+            _call_label("synthesis", synth_name, synth_model),
         )
     )
     output = (
@@ -533,14 +579,18 @@ async def _moderator_signals_done(
     round_num: int,
 ) -> bool:
     prompt = build_convergence_prompt(cfg.prompt, latest_ok)
-    _note(f"Round {round_num}: moderator {moderator.name} checking for convergence...")
-    result = await run_provider(
+    mod_model = cfg.models.get(moderator.name) or moderator.default_model
+    _progress_note(
+        f"Round {round_num}: moderator {moderator.name} checking for convergence..."
+    )
+    result = await _run_with_status(
         moderator,
         prompt,
         cfg.timeout,
         cfg.models.get(moderator.name),
         cfg.yolo,
         cfg.efforts.get(moderator.name),
+        _call_label("convergence", moderator.name, mod_model),
     )
     done = result.status == "ok" and result.stdout.strip().upper().startswith(
         CONVERGENCE_DONE
@@ -572,14 +622,16 @@ async def _run_debate(
                 if other.name != debater.name and other.name in latest
             ]
             turn_prompt = build_debate_turn_prompt(cfg.prompt, prior)
-            _note(f"Round {round_num}: {debater.name} responding...")
-            result = await run_provider(
+            debater_model = cfg.models.get(debater.name) or debater.default_model
+            _progress_note(f"Round {round_num}: {debater.name} responding...")
+            result = await _run_with_status(
                 debater,
                 turn_prompt,
                 cfg.timeout,
                 cfg.models.get(debater.name),
                 cfg.yolo,
                 cfg.efforts.get(debater.name),
+                _call_label(f"round {round_num}", debater.name, debater_model),
             )
             transcript.append(result)
             latest[debater.name] = result
@@ -606,14 +658,16 @@ async def _run_debate(
         return transcript, None
 
     verdict_prompt, _label_map = build_verdict_prompt(cfg.prompt, transcript)
-    _note(f"Moderator {moderator.name} writing the final answer...")
-    verdict = await run_provider(
+    mod_model = cfg.models.get(moderator.name) or moderator.default_model
+    _progress_note(f"Moderator {moderator.name} writing the final answer...")
+    verdict = await _run_with_status(
         moderator,
         verdict_prompt,
         cfg.timeout,
         cfg.models.get(moderator.name),
         cfg.yolo,
         cfg.efforts.get(moderator.name),
+        _call_label("verdict", moderator.name, mod_model),
     )
     transcript.append(verdict)
     output = (

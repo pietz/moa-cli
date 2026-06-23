@@ -1,6 +1,6 @@
 [project]
 name = "moa-cli"
-version = "0.3.5"
+version = "0.4.0"
 description = "Ask one question to multiple local AI coding CLIs in parallel and collect their answers."
 readme = "README.md"
 authors = [

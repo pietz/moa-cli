@@ -9,6 +9,7 @@ from moa_cli.execution import RunResult
 from moa_cli.providers import PROVIDERS, Provider
 from moa_cli.workflows import (
     ADVERSARIAL_INSTRUCTION,
+    DEBATER_OPENING_INSTRUCTION,
     SYNTHESIZER_PROMPT,
     assign_debate_roles,
     build_convergence_prompt,
@@ -402,13 +403,24 @@ def _provs(*names: str) -> list[Provider]:
 
 
 def test_debate_default_roles_two_debaters_moderator_first() -> None:
-    # Default: top 2 selected debate; the moderator is the first (top-priority)
-    # selected provider - which is also one of the debaters.
+    # With only 2 selected agents, the top-priority one moderates its own debate.
     for moderator in (None, "auto"):
-        debaters, mod = assign_debate_roles(_provs("claude", "codex", "agy"), moderator)
+        debaters, mod = assign_debate_roles(_provs("claude", "codex"), moderator)
         assert [p.name for p in debaters] == ["claude", "codex"]
         assert mod.name == "claude"
         assert mod.name in [p.name for p in debaters]  # the moderator may debate
+
+
+def test_debate_default_moderator_is_neutral_when_third_available() -> None:
+    # With >=3 selected agents, the default moderator is the 3rd (neutral - not a
+    # debater), so the verdict isn't written by someone who also argued for a side.
+    for moderator in (None, "auto"):
+        debaters, mod = assign_debate_roles(
+            _provs("claude", "codex", "agy"), moderator
+        )
+        assert [p.name for p in debaters] == ["claude", "codex"]
+        assert mod.name == "agy"
+        assert mod.name not in [p.name for p in debaters]
 
 
 def test_debate_moderator_pinned_to_nondebater() -> None:
@@ -816,11 +828,14 @@ def test_build_verdict_prompt_ignores_failed_turns() -> None:
 
 
 def test_build_debate_turn_prompt_round1_first_turn_is_cold() -> None:
-    # Round 1, first debater: no prior answers, so no adversarial instruction.
+    # Round 1, first debater: no prior answers, so no adversarial critique of another
+    # participant's answer - but the opening turn carries a stance instruction so it
+    # isn't a contentless one-word reply.
     prompt = build_debate_turn_prompt("What is 2+2?", prior=[])
     assert "What is 2+2?" in prompt
     assert ADVERSARIAL_INSTRUCTION not in prompt
-    assert "other participant" not in prompt
+    assert "The other participant's latest answer" not in prompt
+    assert DEBATER_OPENING_INSTRUCTION in prompt
 
 
 def test_build_debate_turn_prompt_later_turn_is_adversarial() -> None:
