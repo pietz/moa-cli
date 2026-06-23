@@ -160,13 +160,14 @@ To avoid repeating the same flags on every call, persist your own defaults in a 
 
 **Keys** (all shared across `ask`/`distill`/`debate`):
 
-| Key           | Type                    | Example                       |
-| ------------- | ----------------------- | ----------------------------- |
-| `num`         | int (>= 1)              | `num = 2`                     |
-| `timeout`     | seconds (> 0)           | `timeout = 120`               |
-| `exclude`     | list of provider names  | `exclude = ["claude"]`        |
-| `synthesizer` | `auto`/`random`/provider | `synthesizer = "codex"`      |
-| `[models]`    | provider -> model table | `claude = "sonnet"`           |
+| Key                | Type                     | Example                       |
+| ------------------ | ------------------------ | ----------------------------- |
+| `num`              | int (>= 1)               | `num = 2`                     |
+| `timeout`          | seconds (> 0)            | `timeout = 120`               |
+| `exclude`          | list of provider names   | `exclude = ["claude"]`        |
+| `synthesizer`      | `auto`/`random`/provider | `synthesizer = "codex"`       |
+| `[providers.<name>]` | per-provider `model` + `effort` | see below              |
+| `[models]`         | DEPRECATED provider -> model table | `claude = "sonnet"` |
 
 ```toml
 # ~/.moa/config.toml
@@ -175,10 +176,16 @@ timeout = 120
 exclude = ["claude"]
 synthesizer = "auto"
 
-[models]
-claude = "sonnet"
-agy = "Gemini 3.1 Pro (Low)"
+[providers.codex]
+model = "gpt-5.5"
+effort = "high"
+
+[providers.opencode]
+model = "zai-coding-plan/glm-5.2"
+effort = "high"
 ```
+
+Model and effort are grouped per provider under `[providers.<name>]`. The flat `[models]` table still works as a **deprecated alias** for `[providers.<name>].model`; when both set a model for the same provider, the `[providers.<name>]` block wins (MOA prints a one-line note, not an error).
 
 **`moa config`** inspects and edits the file (it creates the dir/file as needed and validates provider names):
 
@@ -187,12 +194,29 @@ moa config show                       # effective config (defaults + file) + pat
 moa config path                       # print the config file path
 moa config set num 2                  # set a scalar
 moa config set exclude claude,codex   # set the exclude list (comma-separated)
-moa config set model claude=sonnet    # set one entry in [models]
+moa config set model codex=gpt-5.5    # set a provider's model
+moa config set effort codex=high      # set a provider's reasoning effort
 moa config unset num                  # remove a key
-moa config unset model claude         # remove one [models] entry
+moa config unset model codex          # remove one provider's model
+moa config unset effort codex         # remove one provider's effort
 ```
 
-The role defaults are persistable too: the distill `synthesizer` and the debate `moderator` (e.g. `moa config set synthesizer codex`, `moa config set moderator agy`). `debate`'s `-r/--rounds` is not persisted. CLI `-m` overrides win per-provider over the config `[models]` table.
+The role defaults are persistable too: the distill `synthesizer` and the debate `moderator` (e.g. `moa config set synthesizer codex`, `moa config set moderator agy`). `debate`'s `-r/--rounds` is not persisted. CLI `-m` overrides win per-provider over the config model.
+
+#### Reasoning / effort
+
+Pin a per-provider **reasoning/effort** level in config so the council runs each tool at the depth you want without repeating flags. This is **config-only**: there is intentionally no `-e/--effort` CLI flag.
+
+MOA uses **raw pass-through with zero value mapping.** It does not normalize effort across providers or invent a canonical low/med/high scale. You write the **exact value the target tool expects**, and MOA pastes it verbatim into that provider's native flag. The only thing MOA maps is *where* the value lands in each provider's argv, never the value itself:
+
+| Provider   | `effort` lands in                    | Notes                                                       |
+| ---------- | ------------------------------------ | ----------------------------------------------------------- |
+| `codex`    | `-c model_reasoning_effort=<value>`  | generic config override                                     |
+| `opencode` | `--variant <value>`                  | opencode's "model variant (provider-specific reasoning effort)" |
+| `agy`      | (none)                               | reasoning is part of the model name, e.g. `Gemini 3.1 Pro (High)` |
+| `claude`   | (none)                               | no per-call effort flag                                     |
+
+Values are **tool-specific and not validated** by MOA (only "non-empty if present"): a value the target tool rejects fails at that tool, not in MOA. When no effort is configured for a provider, MOA passes **no effort flag at all**, so the tool's own default stands. Setting `effort` for `agy`/`claude` is stored but inert (they have no effort flag); MOA notes this when you set it.
 
 ### Output
 

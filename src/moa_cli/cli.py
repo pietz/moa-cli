@@ -29,11 +29,14 @@ import typer
 # Providers: each agent CLI we know how to drive.
 # --------------------------------------------------------------------------- #
 
-# A command builder turns (prompt, model, output_file, perm) into an argv list.
-# output_file is a path the CLI may be told to write its final answer to; it is
-# None for providers that answer cleanly on stdout. Only codex uses it. `perm`
-# is the permission argv (read-only or yolo flags) spliced in before the prompt.
-CommandBuilder = Callable[[str, str, str | None, tuple[str, ...]], list[str]]
+# A command builder turns (prompt, model, output_file, perm, effort) into an argv
+# list. output_file is a path the CLI may be told to write its final answer to; it
+# is None for providers that answer cleanly on stdout. Only codex uses it. `perm`
+# is the permission argv (read-only or yolo flags) and `effort` is the reasoning
+# argv (the provider's native flag with the user's value pasted in verbatim), both
+# spliced in before the prompt. `effort` is an empty tuple when no effort is
+# configured or the provider has no effort flag.
+CommandBuilder = Callable[[str, str, str | None, tuple[str, ...], tuple[str, ...]], list[str]]
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,25 @@ class Provider:
     unset_env: tuple[str, ...] = ()
     # codex's stdout is session chrome; its real answer goes to an output file.
     uses_output_file: bool = False
+    # Reasoning/effort flag mapping, declared as data (like perm_args), not
+    # branched per tool. This is the ONLY thing moa knows about effort: WHERE the
+    # user's value lands in argv. It never normalizes or validates the value. The
+    # callable takes the raw effort value and returns the argv to splice in; it is
+    # called only for a non-empty value. `None` means the provider has no per-call
+    # effort flag (agy carries effort in the model name; claude has none), so
+    # effort_args always returns () for it.
+    effort_flag: Callable[[str], tuple[str, ...]] | None = None
+
+    def effort_args(self, value: str | None) -> tuple[str, ...]:
+        """The reasoning/effort argv for this run, value pasted in verbatim.
+
+        Empty tuple when the provider has no effort flag (agy/claude) or no
+        effort is configured (value is None/empty). moa never interprets the
+        value: it is the exact wording the target tool expects.
+        """
+        if not value or self.effort_flag is None:
+            return ()
+        return self.effort_flag(value)
 
     def env(self) -> dict[str, str]:
         env = dict(os.environ)
@@ -77,31 +99,41 @@ class Provider:
         return self.readonly or ()
 
 
-def _claude(prompt: str, model: str, _out: str | None, perm: tuple[str, ...]) -> list[str]:
+def _claude(
+    prompt: str, model: str, _out: str | None, perm: tuple[str, ...], _effort: tuple[str, ...]
+) -> list[str]:
+    # claude has no clean per-call effort flag, so _effort is always () here.
     return ["claude", "--model", model, *perm, "-p", prompt]
 
 
-def _codex(prompt: str, model: str, out: str | None, perm: tuple[str, ...]) -> list[str]:
-    cmd = ["codex", "exec", "-m", model, "--skip-git-repo-check", "--color", "never", *perm]
+def _codex(
+    prompt: str, model: str, out: str | None, perm: tuple[str, ...], effort: tuple[str, ...]
+) -> list[str]:
+    cmd = ["codex", "exec", "-m", model, "--skip-git-repo-check", "--color", "never", *perm, *effort]
     if out:
         cmd += ["-o", out]
     cmd.append(prompt)
     return cmd
 
 
-def _agy(prompt: str, model: str, _out: str | None, perm: tuple[str, ...]) -> list[str]:
+def _agy(
+    prompt: str, model: str, _out: str | None, perm: tuple[str, ...], _effort: tuple[str, ...]
+) -> list[str]:
     # agy also hosts Claude/GPT-OSS models, so we pin a Gemini model explicitly
     # to keep the panel diverse. Without --model it defaults to Gemini Flash.
     # perm (e.g. --sandbox) goes first so the default reads `agy --sandbox
-    # --model ... -p ...`.
+    # --model ... -p ...`. agy's reasoning lives in the model name, so _effort is
+    # always () here.
     return ["agy", *perm, "--model", model, "-p", prompt]
 
 
-def _opencode(prompt: str, model: str, _out: str | None, perm: tuple[str, ...]) -> list[str]:
+def _opencode(
+    prompt: str, model: str, _out: str | None, perm: tuple[str, ...], effort: tuple[str, ...]
+) -> list[str]:
     # opencode has no universal default model (it depends on which provider the
     # user has authed), so we omit -m when no model is given and let opencode
     # pick its own default. The prompt is a positional arg.
-    cmd = ["opencode", "run", *perm]
+    cmd = ["opencode", "run", *perm, *effort]
     if model:
         cmd += ["-m", model]
     cmd.append(prompt)
@@ -120,6 +152,10 @@ PROVIDERS: dict[str, Provider] = {
         readonly=("-s", "read-only"),
         yolo=("-s", "danger-full-access"),
         uses_output_file=True,
+        # Verified against installed codex: `-c key=value` is the generic config
+        # override (`codex exec --help`); reasoning effort lives at
+        # model_reasoning_effort. The value is pasted verbatim.
+        effort_flag=lambda v: ("-c", f"model_reasoning_effort={v}"),
     ),
     "agy": Provider(
         "agy", "agy", "Gemini 3.1 Pro (High)", _agy,
@@ -135,6 +171,10 @@ PROVIDERS: dict[str, Provider] = {
         "opencode", "opencode", "", _opencode,
         readonly=("--agent", "plan"),
         yolo=(),  # default = build agent (full access)
+        # Verified against installed opencode: `--variant <value>` is the
+        # "model variant (provider-specific reasoning effort, e.g., high)" flag
+        # (`opencode run --help`). The value is pasted verbatim.
+        effort_flag=lambda v: ("--variant", v),
     ),
 }
 
@@ -232,7 +272,12 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
 
 
 async def run_provider(
-    provider: Provider, prompt: str, timeout: float, model: str | None = None, yolo: bool = False
+    provider: Provider,
+    prompt: str,
+    timeout: float,
+    model: str | None = None,
+    yolo: bool = False,
+    effort: str | None = None,
 ) -> RunResult:
     model = model or provider.default_model
     out_file: str | None = None
@@ -244,7 +289,7 @@ async def run_provider(
     try:
         try:
             process = await asyncio.create_subprocess_exec(
-                *provider.build(prompt, model, out_file, provider.perm_args(yolo)),
+                *provider.build(prompt, model, out_file, provider.perm_args(yolo), provider.effort_args(effort)),
                 # DEVNULL is essential: codex and agy block forever on an
                 # inherited TTY stdin, burning the entire timeout otherwise.
                 stdin=asyncio.subprocess.DEVNULL,
@@ -286,11 +331,15 @@ async def stream(
     timeout: float,
     models: dict[str, str] | None = None,
     yolo: bool = False,
+    efforts: dict[str, str] | None = None,
 ) -> AsyncIterator[RunResult]:
     """Run every provider in parallel, yielding each result as it finishes."""
     models = models or {}
+    efforts = efforts or {}
     tasks = [
-        asyncio.create_task(run_provider(p, prompt, timeout, models.get(p.name), yolo))
+        asyncio.create_task(
+            run_provider(p, prompt, timeout, models.get(p.name), yolo, efforts.get(p.name))
+        )
         for p in providers
     ]
     for completed in asyncio.as_completed(tasks):
@@ -686,15 +735,23 @@ def verdict_record(result: RunResult, moderator: str) -> dict:
 # merge happens once, in resolve_run, so all verbs pick up defaults identically.
 # --------------------------------------------------------------------------- #
 
-# Scalar config keys and the type each maps to. `exclude` (list[str]) and the
-# `[models]` table are handled separately because they aren't plain scalars.
+# Scalar config keys and the type each maps to. `exclude` (list[str]), the
+# `[providers.<name>]` blocks, and the deprecated `[models]` table are handled
+# separately because they aren't plain scalars.
 _CONFIG_SCALARS: dict[str, type] = {"num": int, "timeout": float, "synthesizer": str, "moderator": str}
-_CONFIG_KEYS: tuple[str, ...] = (*_CONFIG_SCALARS, "exclude", "models")
+# Top-level config keys a file may contain. `providers` is the canonical
+# per-provider block (model + effort); `models` is the DEPRECATED flat alias for
+# `[providers.<name>].model`, kept for back-compat with 0.2.x/0.3.x configs.
+_CONFIG_KEYS: tuple[str, ...] = (*_CONFIG_SCALARS, "exclude", "providers", "models")
+# Per-provider keys allowed inside a `[providers.<name>]` block.
+_PROVIDER_KEYS: tuple[str, ...] = ("model", "effort")
 # Synthesizer accepts the special modes plus any known provider name.
 _SYNTHESIZER_MODES: tuple[str, ...] = ("auto", "first", "random")
 # Moderator accepts "auto" (the top-priority selected agent) or a provider name.
 _MODERATOR_MODES: tuple[str, ...] = ("auto",)
 # The built-in defaults, shown by `config show` when a key isn't in the file.
+# `models`/`efforts` are the normalized per-provider maps load_config produces;
+# serialize_config renders them back as `[providers.<name>]` blocks.
 _CONFIG_DEFAULTS: dict = {
     "num": 3,
     "timeout": 600.0,
@@ -702,6 +759,7 @@ _CONFIG_DEFAULTS: dict = {
     "moderator": "auto",
     "exclude": [],
     "models": {},
+    "efforts": {},
 }
 
 
@@ -770,12 +828,57 @@ def load_config() -> dict:
             raise ValueError("Config key 'exclude' must be a list of provider names.")
         _validate_providers(value, "exclude")
         config["exclude"] = value
+    # Models come from two places: the canonical `[providers.<name>].model` and
+    # the DEPRECATED flat `[models]` table. Start from the deprecated table, then
+    # let the provider blocks win on conflict (with a one-line note, not an
+    # error). Efforts come only from `[providers.<name>].effort`.
+    models: dict[str, str] = {}
+    efforts: dict[str, str] = {}
+
     if "models" in raw:
-        models = raw["models"]
-        if not isinstance(models, dict) or not all(isinstance(v, str) for v in models.values()):
+        legacy = raw["models"]
+        if not isinstance(legacy, dict) or not all(isinstance(v, str) for v in legacy.values()):
             raise ValueError("Config table '[models]' must map provider names to model strings.")
-        _validate_providers(models, "[models]")
-        config["models"] = dict(models)
+        _validate_providers(legacy, "[models]")
+        models.update(legacy)
+
+    if "providers" in raw:
+        providers = raw["providers"]
+        if not isinstance(providers, dict):
+            raise ValueError("Config table '[providers]' must map provider names to {model, effort} blocks.")
+        _validate_providers(providers, "[providers]")
+        shadowed: list[str] = []
+        for name, block in providers.items():
+            if not isinstance(block, dict):
+                raise ValueError(f"Config table '[providers.{name}]' must be a {{model, effort}} block.")
+            unknown_pk = [k for k in block if k not in _PROVIDER_KEYS]
+            if unknown_pk:
+                raise ValueError(
+                    f"Unknown key(s) in [providers.{name}]: {', '.join(unknown_pk)}. "
+                    f"Known: {', '.join(_PROVIDER_KEYS)}."
+                )
+            if "model" in block:
+                model = block["model"]
+                if not isinstance(model, str):
+                    raise ValueError(f"[providers.{name}].model must be a string.")
+                if name in raw.get("models", {}) and raw["models"][name] != model:
+                    shadowed.append(name)
+                models[name] = model
+            if "effort" in block:
+                effort = block["effort"]
+                if not isinstance(effort, str) or not effort:
+                    raise ValueError(f"[providers.{name}].effort must be a non-empty string.")
+                efforts[name] = effort
+        if shadowed:
+            _note(
+                f"Note: [providers.{shadowed[0]}].model overrides the deprecated [models] entry "
+                f"for {', '.join(shadowed)}."
+            )
+
+    if models:
+        config["models"] = models
+    if efforts:
+        config["efforts"] = efforts
     return config
 
 
@@ -799,10 +902,14 @@ def _toml_str(value: str) -> str:
 
 
 def serialize_config(config: dict) -> str:
-    """Render our flat config schema back to TOML text.
+    """Render our config schema back to TOML text.
 
-    Hand-rolled on purpose (no writer dependency): we only ever emit scalars,
-    the `exclude` string list, and the `[models]` string table, in that order.
+    Hand-rolled on purpose (no writer dependency): we emit scalars, the `exclude`
+    string list, then one `[providers.<name>]` block per provider that has a
+    model and/or effort. We always write the canonical `[providers.<name>]` form
+    (never the deprecated flat `[models]` table), so a round-trip upgrades an old
+    file's models in place. The normalized `models`/`efforts` maps are folded
+    back together per provider so model and effort stay grouped.
     """
     lines: list[str] = []
     if "num" in config:
@@ -819,11 +926,19 @@ def serialize_config(config: dict) -> str:
     if "exclude" in config:
         items = ", ".join(_toml_str(v) for v in config["exclude"])
         lines.append(f"exclude = [{items}]")
-    if config.get("models"):
+    models = config.get("models") or {}
+    efforts = config.get("efforts") or {}
+    # Emit one block per provider, in PRIORITY order then any extras, grouping the
+    # provider's model and effort together.
+    names = [n for n in PRIORITY if n in models or n in efforts]
+    names += [n for n in (*models, *efforts) if n not in names]
+    for name in names:
         lines.append("")
-        lines.append("[models]")
-        for provider, model in config["models"].items():
-            lines.append(f"{provider} = {_toml_str(model)}")
+        lines.append(f"[providers.{name}]")
+        if name in models:
+            lines.append(f"model = {_toml_str(models[name])}")
+        if name in efforts:
+            lines.append(f"effort = {_toml_str(efforts[name])}")
     return "\n".join(lines) + "\n" if lines else ""
 
 
@@ -927,6 +1042,7 @@ async def _collect(
     models: dict[str, str] | None = None,
     yolo: bool = False,
     emit_blocks: bool = True,
+    efforts: dict[str, str] | None = None,
 ) -> list[RunResult]:
     """Gather every agent's result. With emit_blocks (ask), each complete answer
     is flushed to stdout the instant it arrives. Without it (distill), the
@@ -934,7 +1050,7 @@ async def _collect(
     distilled block is content - so we keep stdout clean and just heartbeat each
     arrival to stderr so a multi-agent run doesn't look frozen while it waits."""
     results: list[RunResult] = []
-    async for result in stream(providers, prompt, timeout, models, yolo):
+    async for result in stream(providers, prompt, timeout, models, yolo, efforts):
         results.append(result)
         if emit_blocks:
             _emit(json.dumps(result_record(result)) if json_output else render_block(result))
@@ -991,6 +1107,7 @@ class RunConfig:
     timeout: float
     json_output: bool
     yolo: bool
+    efforts: dict[str, str]
 
 
 def resolve_run(
@@ -1034,6 +1151,10 @@ def resolve_run(
     # CLI -m overrides win per-provider over config [models]; unnamed providers
     # keep their config value, then their built-in default.
     models = {**config.get("models", {}), **parse_model_overrides(model)}
+    # Effort is config-only (no CLI flag, by design); it comes straight from the
+    # per-provider config blocks. agy/claude have no effort flag, so a value set
+    # for them is simply ignored by their builder (effort_args returns ()).
+    efforts = dict(config.get("efforts", {}))
 
     if num < 1:
         raise typer.BadParameter("--num must be at least 1.")
@@ -1064,7 +1185,7 @@ def resolve_run(
                 note += f"; note: {p.readonly_note}"
     _note(note)
 
-    return RunConfig(prompt_text, selected, models, timeout, json_output, yolo)
+    return RunConfig(prompt_text, selected, models, timeout, json_output, yolo, efforts)
 
 
 @app.command()
@@ -1083,7 +1204,10 @@ def ask(
     cfg = resolve_run(prompt, file, num, provider, exclude, model, timeout, json_output, yolo)
 
     results = asyncio.run(
-        _collect(cfg.selected, cfg.prompt, cfg.timeout, cfg.json_output, cfg.models, cfg.yolo)
+        _collect(
+            cfg.selected, cfg.prompt, cfg.timeout, cfg.json_output, cfg.models, cfg.yolo,
+            efforts=cfg.efforts,
+        )
     )
     if not any(r.status == "ok" for r in results):
         raise typer.Exit(code=1)
@@ -1117,7 +1241,7 @@ def distill(
     results = asyncio.run(
         _collect(
             cfg.selected, cfg.prompt, cfg.timeout, cfg.json_output, cfg.models, cfg.yolo,
-            emit_blocks=False,
+            emit_blocks=False, efforts=cfg.efforts,
         )
     )
     successes = [r for r in results if r.status == "ok"]
@@ -1152,7 +1276,10 @@ def _run_synthesis(
     _note(f"Distilling with {synth_name}...")
     synth_model = cfg.models.get(synth_name)
     synth_result = asyncio.run(
-        run_provider(PROVIDERS[synth_name], synth_prompt, cfg.timeout, synth_model, cfg.yolo)
+        run_provider(
+            PROVIDERS[synth_name], synth_prompt, cfg.timeout, synth_model, cfg.yolo,
+            cfg.efforts.get(synth_name),
+        )
     )
 
     if cfg.json_output:
@@ -1227,7 +1354,8 @@ async def _moderator_signals_done(
     prompt = build_convergence_prompt(cfg.prompt, latest_ok)
     _note(f"Round {round_num}: moderator {moderator.name} checking for convergence...")
     result = await run_provider(
-        moderator, prompt, cfg.timeout, cfg.models.get(moderator.name), cfg.yolo
+        moderator, prompt, cfg.timeout, cfg.models.get(moderator.name), cfg.yolo,
+        cfg.efforts.get(moderator.name),
     )
     done = result.status == "ok" and result.stdout.strip().upper().startswith(CONVERGENCE_DONE)
     if done:
@@ -1266,7 +1394,8 @@ async def _run_debate(
             turn_prompt = build_debate_turn_prompt(cfg.prompt, prior)
             _note(f"Round {round_num}: {debater.name} responding...")
             result = await run_provider(
-                debater, turn_prompt, cfg.timeout, cfg.models.get(debater.name), cfg.yolo
+                debater, turn_prompt, cfg.timeout, cfg.models.get(debater.name), cfg.yolo,
+                cfg.efforts.get(debater.name),
             )
             transcript.append(result)
             latest[debater.name] = result
@@ -1298,7 +1427,8 @@ async def _run_debate(
     verdict_prompt, _label_map = build_verdict_prompt(cfg.prompt, transcript)
     _note(f"Moderator {moderator.name} writing the final answer...")
     verdict = await run_provider(
-        moderator, verdict_prompt, cfg.timeout, cfg.models.get(moderator.name), cfg.yolo
+        moderator, verdict_prompt, cfg.timeout, cfg.models.get(moderator.name), cfg.yolo,
+        cfg.efforts.get(moderator.name),
     )
     transcript.append(verdict)
     _emit(
@@ -1371,8 +1501,8 @@ def config_show() -> None:
 
 @config_app.command("set")
 def config_set(
-    key: Annotated[str, typer.Argument(help="Config key: num | timeout | synthesizer | moderator | exclude | model.")],
-    value: Annotated[str, typer.Argument(help="Value. For models: PROVIDER=MODEL. For exclude: comma-separated names.")],
+    key: Annotated[str, typer.Argument(help="Config key: num | timeout | synthesizer | moderator | exclude | model | effort.")],
+    value: Annotated[str, typer.Argument(help="Value. For model/effort: PROVIDER=VALUE. For exclude: comma-separated names.")],
 ) -> None:
     """Write a value to the config file, creating the dir/file if missing."""
     config = _load_config_or_exit()
@@ -1385,6 +1515,22 @@ def config_set(
         if provider not in PROVIDERS:
             raise typer.BadParameter(f"Unknown provider: {provider!r}. Known: {', '.join(PROVIDERS)}.")
         config.setdefault("models", {})[provider] = model
+    elif key == "effort":
+        if "=" not in value:
+            raise typer.BadParameter("effort expects PROVIDER=VALUE, e.g. `moa config set effort codex=high`.")
+        provider, effort = value.split("=", 1)
+        provider = provider.strip()
+        if provider not in PROVIDERS:
+            raise typer.BadParameter(f"Unknown provider: {provider!r}. Known: {', '.join(PROVIDERS)}.")
+        # Raw pass-through: the value is whatever the target tool expects; moa
+        # only refuses an empty string (no enum/scale validation, by design).
+        if not effort:
+            raise typer.BadParameter("effort value cannot be empty.")
+        config.setdefault("efforts", {})[provider] = effort
+        if PROVIDERS[provider].effort_flag is None:
+            # Stored but inert: agy carries reasoning in the model name, claude
+            # has no per-call effort flag. A note, not an error.
+            _note(f"Note: {provider} has no effort flag; this value will be ignored at runtime.")
     elif key == "exclude":
         names = [name.strip() for name in value.split(",") if name.strip()]
         try:
@@ -1404,7 +1550,7 @@ def config_set(
             raise typer.BadParameter(str(exc)) from exc
         config[key] = coerced
     else:
-        known = "num, timeout, synthesizer, moderator, exclude, model"
+        known = "num, timeout, synthesizer, moderator, exclude, model, effort"
         raise typer.BadParameter(f"Unknown config key: {key!r}. Known: {known}.")
 
     write_config(config)
@@ -1413,24 +1559,27 @@ def config_set(
 
 @config_app.command("unset")
 def config_unset(
-    key: Annotated[str, typer.Argument(help="Config key to remove. Use `model PROVIDER` to drop one model.")],
-    provider: Annotated[str | None, typer.Argument(help="Provider name, only when key is 'model'.")] = None,
+    key: Annotated[str, typer.Argument(help="Config key to remove. Use `model PROVIDER` / `effort PROVIDER` to drop one.")],
+    provider: Annotated[str | None, typer.Argument(help="Provider name, only when key is 'model' or 'effort'.")] = None,
 ) -> None:
-    """Remove a key from the config file (or a single model with `unset model PROVIDER`)."""
+    """Remove a key from the config file (or a single model/effort with `unset model|effort PROVIDER`)."""
     config = _load_config_or_exit()
 
-    if key == "model":
+    if key in ("model", "effort"):
+        # model -> the normalized [providers.<name>].model map (a.k.a. [models]);
+        # effort -> the [providers.<name>].effort map. Same per-provider shape.
+        table_key = "models" if key == "model" else "efforts"
         if not provider:
-            raise typer.BadParameter("unset model expects a provider, e.g. `moa config unset model claude`.")
-        models = config.get("models", {})
-        if provider in models:
-            del models[provider]
-            if not models:
-                config.pop("models", None)
+            raise typer.BadParameter(f"unset {key} expects a provider, e.g. `moa config unset {key} codex`.")
+        table = config.get(table_key, {})
+        if provider in table:
+            del table[provider]
+            if not table:
+                config.pop(table_key, None)
             write_config(config)
-            typer.echo(f"Unset model {provider} in {config_path()}")
+            typer.echo(f"Unset {key} {provider} in {config_path()}")
         else:
-            typer.echo(f"model {provider} was not set.")
+            typer.echo(f"{key} {provider} was not set.")
         return
 
     if key not in _CONFIG_KEYS:

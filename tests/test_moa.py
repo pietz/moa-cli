@@ -48,7 +48,7 @@ def test_claude_env_unsets_claudecode(monkeypatch) -> None:
 
 
 def test_codex_command_uses_output_file_and_skip_git() -> None:
-    cmd = PROVIDERS["codex"].build("hello", "gpt-5.5", "/tmp/out.txt", ())
+    cmd = PROVIDERS["codex"].build("hello", "gpt-5.5", "/tmp/out.txt", (), ())
     assert cmd[:4] == ["codex", "exec", "-m", "gpt-5.5"]
     assert "--skip-git-repo-check" in cmd
     assert cmd[cmd.index("-o") + 1] == "/tmp/out.txt"
@@ -57,14 +57,14 @@ def test_codex_command_uses_output_file_and_skip_git() -> None:
 
 def test_agy_command_pins_gemini_model() -> None:
     # Regression: agy must get an explicit --model or it defaults to Gemini Flash.
-    cmd = PROVIDERS["agy"].build("hi", "Gemini 3.1 Pro (High)", None, ())
+    cmd = PROVIDERS["agy"].build("hi", "Gemini 3.1 Pro (High)", None, (), ())
     assert cmd == ["agy", "--model", "Gemini 3.1 Pro (High)", "-p", "hi"]
 
 
 def test_opencode_command_omits_model_when_empty() -> None:
     # opencode has no universal default; an empty model means "skip -m".
-    assert PROVIDERS["opencode"].build("hi", "", None, ()) == ["opencode", "run", "hi"]
-    cmd = PROVIDERS["opencode"].build("hi", "prov/model", None, ())
+    assert PROVIDERS["opencode"].build("hi", "", None, (), ()) == ["opencode", "run", "hi"]
+    cmd = PROVIDERS["opencode"].build("hi", "prov/model", None, (), ())
     assert cmd == ["opencode", "run", "-m", "prov/model", "hi"]
 
 
@@ -91,25 +91,131 @@ def test_perm_args_readonly_vs_yolo_per_provider() -> None:
 def test_build_splices_readonly_before_prompt() -> None:
     # Read-only flags land before the positional prompt for each tool.
     p = PROVIDERS
-    assert p["claude"].build("hi", "opus", None, ("--permission-mode", "plan")) == [
+    assert p["claude"].build("hi", "opus", None, ("--permission-mode", "plan"), ()) == [
         "claude", "--model", "opus", "--permission-mode", "plan", "-p", "hi",
     ]
-    codex_cmd = p["codex"].build("hi", "gpt-5.5", "/tmp/o.txt", ("-s", "read-only"))
+    codex_cmd = p["codex"].build("hi", "gpt-5.5", "/tmp/o.txt", ("-s", "read-only"), ())
     assert codex_cmd[codex_cmd.index("-s") + 1] == "read-only"
     assert codex_cmd.index("-s") < codex_cmd.index("-o")  # perm flags before output flag
     assert codex_cmd[-1] == "hi"
-    assert p["opencode"].build("hi", "", None, ("--agent", "plan")) == [
+    assert p["opencode"].build("hi", "", None, ("--agent", "plan"), ()) == [
         "opencode", "run", "--agent", "plan", "hi",
     ]
-    assert p["agy"].build("hi", "g", None, ()) == ["agy", "--model", "g", "-p", "hi"]
+    assert p["agy"].build("hi", "g", None, (), ()) == ["agy", "--model", "g", "-p", "hi"]
 
 
 def test_build_splices_yolo_flags() -> None:
-    assert PROVIDERS["claude"].build("hi", "opus", None, ("--permission-mode", "bypassPermissions")) == [
+    assert PROVIDERS["claude"].build("hi", "opus", None, ("--permission-mode", "bypassPermissions"), ()) == [
         "claude", "--model", "opus", "--permission-mode", "bypassPermissions", "-p", "hi",
     ]
-    codex_cmd = PROVIDERS["codex"].build("hi", "gpt-5.5", None, ("-s", "danger-full-access"))
+    codex_cmd = PROVIDERS["codex"].build("hi", "gpt-5.5", None, ("-s", "danger-full-access"), ())
     assert codex_cmd[codex_cmd.index("-s") + 1] == "danger-full-access"
+
+
+# --- reasoning / effort (config-only, raw pass-through) ---------------------
+
+
+def test_effort_args_maps_per_provider_verbatim() -> None:
+    # The ONLY mapping moa knows: variable -> flag location. The value is pasted
+    # verbatim, never normalized. codex -> -c model_reasoning_effort=<v>,
+    # opencode -> --variant <v>; agy/claude have no flag, so always ().
+    assert PROVIDERS["codex"].effort_args("high") == ("-c", "model_reasoning_effort=high")
+    assert PROVIDERS["codex"].effort_args("xl") == ("-c", "model_reasoning_effort=xl")
+    assert PROVIDERS["opencode"].effort_args("high") == ("--variant", "high")
+    assert PROVIDERS["opencode"].effort_args("max") == ("--variant", "max")
+    # agy carries reasoning in the model name; claude has no per-call flag.
+    assert PROVIDERS["agy"].effort_args("high") == ()
+    assert PROVIDERS["claude"].effort_args("high") == ()
+
+
+def test_effort_args_unset_is_empty_for_every_provider() -> None:
+    # No effort configured (None or empty) => no flag for ANY provider.
+    for name in PROVIDERS:
+        assert PROVIDERS[name].effort_args(None) == ()
+        assert PROVIDERS[name].effort_args("") == ()
+
+
+def test_build_splices_effort_after_perm_before_prompt() -> None:
+    # Effort flags land after the permission flags and before the prompt/output.
+    codex_cmd = PROVIDERS["codex"].build(
+        "hi", "gpt-5.5", "/tmp/o.txt", ("-s", "read-only"), ("-c", "model_reasoning_effort=high")
+    )
+    assert "model_reasoning_effort=high" in codex_cmd
+    assert codex_cmd.index("-s") < codex_cmd.index("-c")  # perm before effort
+    assert codex_cmd.index("-c") < codex_cmd.index("-o")  # effort before output
+    assert codex_cmd[-1] == "hi"
+    opencode_cmd = PROVIDERS["opencode"].build(
+        "hi", "prov/model", None, ("--agent", "plan"), ("--variant", "high")
+    )
+    assert opencode_cmd == [
+        "opencode", "run", "--agent", "plan", "--variant", "high", "-m", "prov/model", "hi",
+    ]
+
+
+def test_build_omits_effort_when_unset() -> None:
+    # An empty effort tuple leaves the argv exactly as before (no stray flag).
+    assert PROVIDERS["codex"].build("hi", "gpt-5.5", None, ("-s", "read-only"), ()) == [
+        "codex", "exec", "-m", "gpt-5.5", "--skip-git-repo-check", "--color", "never", "-s", "read-only", "hi",
+    ]
+    assert PROVIDERS["opencode"].build("hi", "", None, (), ()) == ["opencode", "run", "hi"]
+
+
+def test_run_provider_threads_effort_into_argv_codex(monkeypatch) -> None:
+    # effort set on codex => -c model_reasoning_effort=<v> in the spawned argv.
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["argv"] = list(args)
+        raise FileNotFoundError
+
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(run_provider(PROVIDERS["codex"], "hi", timeout=5, model="gpt-5.5", effort="high"))
+    assert "-c" in captured["argv"]
+    assert captured["argv"][captured["argv"].index("-c") + 1] == "model_reasoning_effort=high"
+
+
+def test_run_provider_threads_effort_into_argv_opencode(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["argv"] = list(args)
+        raise FileNotFoundError
+
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(run_provider(PROVIDERS["opencode"], "hi", timeout=5, model="p/m", effort="max"))
+    assert "--variant" in captured["argv"]
+    assert captured["argv"][captured["argv"].index("--variant") + 1] == "max"
+
+
+def test_run_provider_omits_effort_when_unset(monkeypatch) -> None:
+    # No effort => no effort flag in argv for codex or opencode.
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["argv"] = list(args)
+        raise FileNotFoundError
+
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(run_provider(PROVIDERS["codex"], "hi", timeout=5, model="gpt-5.5"))
+    assert "model_reasoning_effort" not in " ".join(captured["argv"])
+    asyncio.run(run_provider(PROVIDERS["opencode"], "hi", timeout=5, model="p/m"))
+    assert "--variant" not in captured["argv"]
+
+
+def test_run_provider_agy_claude_emit_no_effort_flag(monkeypatch) -> None:
+    # Even with an effort value, agy and claude spawn NO effort flag (they have
+    # no mapping); the value is silently inert.
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["argv"] = list(args)
+        raise FileNotFoundError
+
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(run_provider(PROVIDERS["agy"], "hi", timeout=5, model="g", effort="high"))
+    assert captured["argv"] == ["agy", "--sandbox", "--model", "g", "-p", "hi"]
+    asyncio.run(run_provider(PROVIDERS["claude"], "hi", timeout=5, model="opus", effort="high"))
+    assert captured["argv"] == ["claude", "--model", "opus", "--permission-mode", "plan", "-p", "hi"]
 
 
 def test_select_for_run_takes_first_n_installed(monkeypatch) -> None:
@@ -172,7 +278,7 @@ def _slow_provider(sleep_seconds: int) -> Provider:
         name="slow",
         executable="uv",
         default_model="test",
-        build=lambda _p, _m, _o, _perm: ["uv", "run", "python", "-c", f"import time; time.sleep({sleep_seconds})"],
+        build=lambda _p, _m, _o, _perm, _e: ["uv", "run", "python", "-c", f"import time; time.sleep({sleep_seconds})"],
     )
 
 
@@ -183,7 +289,7 @@ def test_run_provider_times_out() -> None:
 
 
 def test_run_provider_missing_executable() -> None:
-    provider = Provider("ghost", "definitely-not-a-real-binary", "x", lambda _p, _m, _o, _perm: ["definitely-not-a-real-binary"])
+    provider = Provider("ghost", "definitely-not-a-real-binary", "x", lambda _p, _m, _o, _perm, _e: ["definitely-not-a-real-binary"])
     result = asyncio.run(run_provider(provider, "hello", timeout=5))
     assert result.status == "missing"
 
@@ -429,7 +535,7 @@ def test_doctor_shows_default_models(monkeypatch) -> None:
 
 
 def _fake_stream(*results: RunResult):
-    async def stream(providers, prompt, timeout, models=None, yolo=False):
+    async def stream(providers, prompt, timeout, models=None, yolo=False, efforts=None):
         for r in results:
             yield r
 
@@ -532,7 +638,7 @@ def test_distill_returns_only_the_merged_answer(monkeypatch) -> None:
     _install_all(monkeypatch)
     monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         return _ok("claude", "merged answer")
 
     monkeypatch.setattr(cli, "run_provider", fake_run_provider)
@@ -554,7 +660,7 @@ def test_distill_json_emits_only_synthesis(monkeypatch) -> None:
     _install_all(monkeypatch)
     monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         return _ok("claude", "merged")
 
     monkeypatch.setattr(cli, "run_provider", fake_run_provider)
@@ -571,7 +677,7 @@ def test_distill_aggregator_input_is_blind_and_shuffled(monkeypatch) -> None:
     monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "ALPHA"), _ok("codex", "BETA")))
     captured: dict = {}
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         captured["prompt"] = prompt
         return _ok("claude", "merged")
 
@@ -591,7 +697,7 @@ def test_distill_synthesizer_selection(monkeypatch) -> None:
     monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
     captured: dict = {}
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         captured["provider"] = provider.name
         return _ok(provider.name, "merged")
 
@@ -608,7 +714,7 @@ def test_distill_skips_with_fewer_than_two_successes(monkeypatch) -> None:
     _install_all(monkeypatch)
     monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A")))
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         raise AssertionError("aggregator must not run with <2 successes")
 
     monkeypatch.setattr(cli, "run_provider", fake_run_provider)
@@ -626,7 +732,7 @@ def test_distill_aggregator_is_read_only_by_default(monkeypatch) -> None:
     monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
     captured: dict = {}
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         captured["yolo"] = yolo
         return _ok("claude", "merged")
 
@@ -642,7 +748,7 @@ def test_distill_aggregator_yolo_propagates(monkeypatch) -> None:
     monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
     captured: dict = {}
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         captured["yolo"] = yolo
         return _ok("claude", "merged")
 
@@ -753,7 +859,7 @@ def test_debate_defaults_to_two_agents(monkeypatch) -> None:
     # two debaters, since the moderator may be one of them.
     _install_all(monkeypatch)
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         return _ok(provider.name, "answer")
 
     monkeypatch.setattr(cli, "run_provider", fake_run_provider)
@@ -769,7 +875,7 @@ def test_debate_runs_rounds_then_verdict(monkeypatch) -> None:
     _install_all(monkeypatch)
     calls: list[str] = []
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         calls.append(provider.name)
         if "Your decision" in prompt:  # moderator convergence check
             return _ok(provider.name, "CONTINUE")
@@ -795,7 +901,7 @@ def test_debate_default_moderator_is_a_debater(monkeypatch) -> None:
     # With just 2 agents the default moderator is the first one (also a debater).
     _install_all(monkeypatch)
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         return _ok(provider.name, "answer")
 
     monkeypatch.setattr(cli, "run_provider", fake_run_provider)
@@ -810,7 +916,7 @@ def test_debate_debaters_and_moderator_read_only_by_default(monkeypatch) -> None
     _install_all(monkeypatch)
     yolos: list[bool] = []
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         yolos.append(yolo)
         return _ok(provider.name, "answer")
 
@@ -866,7 +972,7 @@ def test_debate_yolo_propagates(monkeypatch) -> None:
     _install_all(monkeypatch)
     yolos: list[bool] = []
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         yolos.append(yolo)
         return _ok(provider.name, "answer")
 
@@ -884,7 +990,7 @@ def test_debate_round_cap_clamped_in_run(monkeypatch) -> None:
     _install_all(monkeypatch)
     calls: list[str] = []
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         calls.append(provider.name)
         if "Your decision" in prompt:  # moderator: never converge, run all rounds
             return _ok(provider.name, "CONTINUE")
@@ -908,7 +1014,7 @@ def test_debate_too_few_providers_exits(monkeypatch) -> None:
     installed = {"claude"}
     monkeypatch.setattr(cli.shutil, "which", lambda exe: exe if exe in installed else None)
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         raise AssertionError("debate must not run with too few providers")
 
     monkeypatch.setattr(cli, "run_provider", fake_run_provider)
@@ -924,7 +1030,7 @@ def test_debate_moderator_converges_early(monkeypatch) -> None:
     _install_all(monkeypatch)
     calls: list[str] = []
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         calls.append(provider.name)
         if "Your decision" in prompt:  # moderator converges immediately
             return _ok(provider.name, "DONE")
@@ -1033,7 +1139,7 @@ def test_debate_moderator_continue_runs_all_rounds(monkeypatch) -> None:
     _install_all(monkeypatch)
     checks = {"n": 0}
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         if "Your decision" in prompt:
             checks["n"] += 1
             return _ok(provider.name, "CONTINUE")
@@ -1107,6 +1213,161 @@ def test_config_set_model_table(monkeypatch, tmp_path) -> None:
     assert runner.invoke(cli.app, ["config", "set", "model", "claude=sonnet"]).exit_code == 0
     assert runner.invoke(cli.app, ["config", "set", "model", "agy=Gemini 3.1 Pro (Low)"]).exit_code == 0
     assert load_config()["models"] == {"claude": "sonnet", "agy": "Gemini 3.1 Pro (Low)"}
+
+
+# --- config: per-provider effort + [models] deprecated alias ----------------
+
+
+def test_config_providers_block_parses_model_and_effort(monkeypatch, tmp_path) -> None:
+    # [providers.<name>] blocks supply model + effort; load normalizes them into
+    # the models/efforts maps.
+    cfg_file = _config_env(monkeypatch, tmp_path)
+    cfg_file.parent.mkdir(parents=True, exist_ok=True)
+    cfg_file.write_text(
+        "[providers.codex]\nmodel = \"gpt-5.5\"\neffort = \"high\"\n\n"
+        "[providers.opencode]\neffort = \"max\"\n",
+        encoding="utf-8",
+    )
+    config = load_config()
+    assert config["models"] == {"codex": "gpt-5.5"}
+    assert config["efforts"] == {"codex": "high", "opencode": "max"}
+
+
+def test_config_models_alias_still_parses(monkeypatch, tmp_path) -> None:
+    # The deprecated flat [models] table still works as an alias for
+    # [providers.<name>].model.
+    cfg_file = _config_env(monkeypatch, tmp_path)
+    cfg_file.parent.mkdir(parents=True, exist_ok=True)
+    cfg_file.write_text('[models]\nclaude = "sonnet"\n', encoding="utf-8")
+    assert load_config()["models"] == {"claude": "sonnet"}
+
+
+def test_config_provider_block_model_wins_over_models_alias(monkeypatch, tmp_path) -> None:
+    # On conflict the [providers.<name>].model wins over the deprecated [models]
+    # entry, and a one-line note is surfaced (not an error).
+    cfg_file = _config_env(monkeypatch, tmp_path)
+    cfg_file.parent.mkdir(parents=True, exist_ok=True)
+    cfg_file.write_text(
+        '[models]\ncodex = "old-model"\n\n[providers.codex]\nmodel = "gpt-5.5"\n',
+        encoding="utf-8",
+    )
+    # load succeeds (no raise) with the provider-block model winning.
+    assert load_config()["models"] == {"codex": "gpt-5.5"}
+    # The note surfaces through a verb that loads config (stderr, not a crash).
+    _install_all(monkeypatch)
+    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("codex", "A")))
+    result = CliRunner().invoke(cli.app, ["ask", "-p", "codex", "hi"])
+    assert result.exit_code == 0
+    assert "overrides the deprecated [models]" in result.stderr
+
+
+def test_config_set_effort_roundtrip(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(cli.app, ["config", "set", "effort", "codex=high"]).exit_code == 0
+    assert runner.invoke(cli.app, ["config", "set", "effort", "opencode=max"]).exit_code == 0
+    assert load_config()["efforts"] == {"codex": "high", "opencode": "max"}
+    # unset one effort, the other survives.
+    assert runner.invoke(cli.app, ["config", "unset", "effort", "codex"]).exit_code == 0
+    assert load_config()["efforts"] == {"opencode": "max"}
+    # unset the last one drops the map entirely.
+    assert runner.invoke(cli.app, ["config", "unset", "effort", "opencode"]).exit_code == 0
+    assert "efforts" not in load_config()
+
+
+def test_config_set_effort_value_passed_through_verbatim(monkeypatch, tmp_path) -> None:
+    # moa does not normalize the value space: any non-empty string round-trips.
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(cli.app, ["config", "set", "effort", "codex=ultra-deep-think"]).exit_code == 0
+    assert load_config()["efforts"]["codex"] == "ultra-deep-think"
+
+
+def test_config_set_effort_rejects_bad_format_and_empty(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(cli.app, ["config", "set", "effort", "codex"]).exit_code != 0  # no '='
+    assert runner.invoke(cli.app, ["config", "set", "effort", "nope=high"]).exit_code != 0  # bad provider
+    assert runner.invoke(cli.app, ["config", "set", "effort", "codex="]).exit_code != 0  # empty value
+
+
+def test_config_set_effort_noflag_provider_notes_but_stores(monkeypatch, tmp_path) -> None:
+    # agy/claude have no effort flag: setting it stores the value but warns it's
+    # inert (a note, not an error).
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["config", "set", "effort", "agy=high"])
+    assert result.exit_code == 0
+    assert "no effort flag" in result.stderr
+    assert load_config()["efforts"] == {"agy": "high"}
+
+
+def test_config_unset_effort_not_set_is_noop(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["config", "unset", "effort", "codex"])
+    assert result.exit_code == 0
+    assert "was not set" in result.stdout
+
+
+def test_config_show_displays_effort_per_provider(monkeypatch, tmp_path) -> None:
+    _config_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    runner.invoke(cli.app, ["config", "set", "model", "codex=gpt-5.5"])
+    runner.invoke(cli.app, ["config", "set", "effort", "codex=high"])
+    result = runner.invoke(cli.app, ["config", "show"])
+    assert result.exit_code == 0
+    assert "[providers.codex]" in result.stdout
+    assert 'model = "gpt-5.5"' in result.stdout
+    assert 'effort = "high"' in result.stdout
+
+
+def test_config_effort_reaches_run(monkeypatch, tmp_path) -> None:
+    # A configured effort flows through resolve_run into run_provider's argv.
+    _install_all(monkeypatch)
+    cfg_file = _config_env(monkeypatch, tmp_path)
+    cfg_file.parent.mkdir(parents=True, exist_ok=True)
+    cfg_file.write_text('[providers.codex]\neffort = "high"\n', encoding="utf-8")
+    argvs: list[list[str]] = []
+
+    async def fake_exec(*args, **kwargs):
+        argvs.append(list(args))
+        raise FileNotFoundError
+
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+    result = CliRunner().invoke(cli.app, ["ask", "-p", "codex", "hi"])
+    assert result.exit_code == 1  # FileNotFoundError -> missing, but argv captured
+    codex_argv = next(a for a in argvs if a and a[0] == "codex")
+    assert "model_reasoning_effort=high" in codex_argv
+
+
+def test_config_effort_omitted_when_unset_reaches_run(monkeypatch, tmp_path) -> None:
+    # No effort in config => no effort flag in the spawned argv (tool default).
+    _install_all(monkeypatch)
+    _config_env(monkeypatch, tmp_path)
+    argvs: list[list[str]] = []
+
+    async def fake_exec(*args, **kwargs):
+        argvs.append(list(args))
+        raise FileNotFoundError
+
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+    result = CliRunner().invoke(cli.app, ["ask", "-p", "codex", "hi"])
+    assert result.exit_code == 1
+    codex_argv = next(a for a in argvs if a and a[0] == "codex")
+    assert "model_reasoning_effort" not in " ".join(codex_argv)
+
+
+def test_serialize_config_effort_roundtrips_via_load(monkeypatch, tmp_path) -> None:
+    # model + effort grouped under [providers.<name>] must reload identically.
+    cfg_file = _config_env(monkeypatch, tmp_path)
+    original = {
+        "models": {"codex": "gpt-5.5"},
+        "efforts": {"codex": "high", "opencode": "max"},
+    }
+    cfg_file.parent.mkdir(parents=True, exist_ok=True)
+    cfg_file.write_text(serialize_config(original), encoding="utf-8")
+    assert load_config() == original
 
 
 def test_config_set_rejects_unknown_key(monkeypatch, tmp_path) -> None:
@@ -1260,8 +1521,9 @@ def test_config_models_reach_run(monkeypatch, tmp_path) -> None:
     )
     captured: dict = {}
 
-    async def fake_stream(providers, prompt, timeout, models=None, yolo=False):
+    async def fake_stream(providers, prompt, timeout, models=None, yolo=False, efforts=None):
         captured["models"] = models
+        captured["efforts"] = efforts
         yield _ok("claude", "A")
 
     monkeypatch.setattr(cli, "stream", fake_stream)
@@ -1281,7 +1543,7 @@ def test_config_synthesizer_default_in_distill(monkeypatch, tmp_path) -> None:
     (tmp_path / "config.toml").write_text('synthesizer = "codex"\n', encoding="utf-8")
     monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B")))
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         return _ok(provider.name, "merged")
 
     monkeypatch.setattr(cli, "run_provider", fake_run_provider)
@@ -1299,7 +1561,7 @@ def test_config_moderator_default_in_debate(monkeypatch, tmp_path) -> None:
     _config_env(monkeypatch, tmp_path)
     (tmp_path / "config.toml").write_text('moderator = "agy"\n', encoding="utf-8")
 
-    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False):
+    async def fake_run_provider(provider, prompt, timeout, model=None, yolo=False, effort=None):
         return _ok(provider.name, "answer")
 
     monkeypatch.setattr(cli, "run_provider", fake_run_provider)
