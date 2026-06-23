@@ -112,9 +112,9 @@ config file or the `OPENCODE_CONFIG` / `OPENCODE_CONFIG_CONTENT` env vars.
   expressible without injecting a scoped-**allow** config via `OPENCODE_CONFIG`.
 - For moa's 2-mode model: **default = `--agent build`** (opencode's normal mode,
   can edit), **yolo = `--dangerously-skip-permissions`**.
-- moa's *current* yolo gap: relying on the bare default `build` leaves
-  `doom_loop:ask`/`external_directory:ask`, which auto-reject headless — true yolo
-  needs `--dangerously-skip-permissions`. Use the **flag**, not the
+- moa's yolo uses `--dangerously-skip-permissions` (not the bare default `build`):
+  `build` still gates `doom_loop`/`external_directory` as `ask`, which auto-reject
+  headless, so they'd silently fail without the flag. Use the **flag**, not the
   `OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS` env var (env var proved unreliable).
 
 Sources: [agents](https://opencode.ai/docs/agents/),

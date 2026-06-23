@@ -174,7 +174,10 @@ PROVIDERS: dict[str, Provider] = {
     "opencode": Provider(
         "opencode", "opencode", "", _opencode,
         readonly=("--agent", "plan"),
-        yolo=(),  # default = build agent (full access)
+        # Bare `build` (the default agent) still gates doom_loop/external_directory
+        # as `ask`, which auto-rejects headless - so true full access needs the
+        # explicit skip-permissions flag. (Verified on opencode 1.17.8.)
+        yolo=("--dangerously-skip-permissions",),
         # Verified against installed opencode: `--variant <value>` is the
         # "model variant (provider-specific reasoning effort, e.g., high)" flag
         # (`opencode run --help`). The value is pasted verbatim.

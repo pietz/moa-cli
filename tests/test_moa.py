@@ -78,7 +78,7 @@ def test_perm_args_readonly_vs_yolo_per_provider() -> None:
     assert PROVIDERS["codex"].perm_args(yolo=False) == ("-s", "read-only")
     assert PROVIDERS["codex"].perm_args(yolo=True) == ("-s", "danger-full-access")
     assert PROVIDERS["opencode"].perm_args(yolo=False) == ("--agent", "plan")
-    assert PROVIDERS["opencode"].perm_args(yolo=True) == ()
+    assert PROVIDERS["opencode"].perm_args(yolo=True) == ("--dangerously-skip-permissions",)
     # agy's --sandbox is only PARTIAL protection (shell vector; it can still edit
     # files), so the default run carries --sandbox plus an honest readonly_note,
     # and under --yolo it drops --sandbox for full access.
@@ -422,6 +422,8 @@ def test_run_provider_yolo_argv(monkeypatch) -> None:
     ]
     asyncio.run(run_provider(PROVIDERS["codex"], "hi", timeout=5, yolo=True))
     assert captured["argv"][captured["argv"].index("-s") + 1] == "danger-full-access"
+    asyncio.run(run_provider(PROVIDERS["opencode"], "hi", timeout=5, yolo=True))
+    assert captured["argv"] == ["opencode", "run", "--dangerously-skip-permissions", "hi"]
 
 
 # --- synthesis --------------------------------------------------------------
