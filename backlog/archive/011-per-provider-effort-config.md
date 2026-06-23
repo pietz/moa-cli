@@ -1,6 +1,6 @@
 # 011 - Per-provider reasoning/effort in config (raw pass-through)
 
-**Status:** ready
+**Status:** done (shipped in 0.3.2; fresh-eyes review passed)
 **Touches:** `src/moa_cli/cli.py` (Provider build path + config load/serialize),
 `tests/test_moa.py`, `README.md`
 **Related:** 005 (model mapping), 008 (persistent config), 010 (doctor check can
