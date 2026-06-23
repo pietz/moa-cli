@@ -3,16 +3,20 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/pietz/moa-cli/actions/workflows/ci.yml"><img src="https://github.com/pietz/moa-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <strong>Ask one question to every frontier coding agent at once.<br>Get their answers back in parallel, with attribution.</strong>
 </p>
 
-# MOA - Mixture of Agents
+<p align="center">
+  <a href="https://github.com/pietz/moa-cli/actions/workflows/ci.yml"><img src="https://github.com/pietz/moa-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/moa-cli/"><img src="https://img.shields.io/pypi/v/moa-cli.svg?label=pypi" alt="PyPI"></a>
+  <a href="https://pypi.org/project/moa-cli/"><img src="https://img.shields.io/pypi/pyversions/moa-cli.svg?label=python" alt="Python"></a>
+  <a href="https://pypi.org/project/moa-cli/"><img src="https://img.shields.io/pypi/l/moa-cli.svg" alt="MIT"></a>
+  <a href="https://pypi.org/project/moa-cli/"><img src="https://img.shields.io/pypi/dm/moa-cli.svg?label=downloads" alt="downloads"></a>
+</p>
 
-Ask one question to multiple local AI coding CLIs **in parallel** and collect their answers. MOA detects which agent CLIs you have installed (Claude Code, Codex, agy, opencode), fans your prompt out to them, and streams each answer back the moment that agent finishes. Or run `moa distill` to have a strong aggregator merge those answers into a single unified response, or `moa debate` to have them critique each other across rounds while a moderator checks for convergence and writes the verdict.
+---
 
-It's a drop-in, batteries-included replacement for hand-rolling parallel `claude -p` / `codex exec` / `opencode run` calls (or a "peer review" agent skill): one command, clean attributed output, made to be called by a human **or** by another agent.
-
-The package is named `moa-cli` but installs the command `moa`.
+> **MOA** (Mixture of Agents) drives the local AI coding CLIs you already have installed, fans one prompt out to all of them in parallel, and streams each answer back the moment it lands. One command, clean attributed output, no API keys of its own. Use it for a council of opinions (`ask`), one merged answer (`distill`), or an adversarial debate with a moderator (`debate`).
 
 ```bash
 uv tool install moa-cli
@@ -25,17 +29,59 @@ Or run it once without installing:
 uvx --from moa-cli moa ask "Review this plan."
 ```
 
-> **Requirements.** MOA drives agent CLIs you install separately - it ships no model
-> or API key of its own. You need at least two of `claude` (Claude Code), `codex`,
-> `agy` (Antigravity), and `opencode` on your `PATH` and logged in. Run **`moa doctor`**
-> first to see which ones MOA can find; with only one installed, the "council" collapses
-> to a single answer.
+## Supported agents
 
-## Why
+MOA auto-detects whichever of these are on your `PATH` and drives them in their safest read-only mode. You need **at least two** for a real council; run **`moa doctor`** to see yours.
 
-A single model gives you one perspective. Asking three frontier models the same question - and seeing where they agree, diverge, or contradict - is a fast, cheap way to pressure-test an answer. MOA makes that a one-liner using the CLIs you already pay for, with no API keys of its own.
+| Agent | CLI | Default model | Read-only |
+| --- | --- | --- | --- |
+| Claude Code | `claude` | `opus` | yes |
+| OpenAI Codex | `codex` | `gpt-5.5` | yes |
+| Google Antigravity | `agy` | `Gemini 3.1 Pro (High)` | partial |
+| opencode | `opencode` | (authed default) | yes |
 
-### Example
+Adding a new agent is a single entry in the `PROVIDERS` table in `src/moa_cli/providers.py`.
+
+## Features
+
+- **Parallel fan-out** - one prompt, N agents, answers streamed as each finishes.
+- **Three collaboration modes** - council (`ask`), synthesis (`distill`), adversarial debate with moderator (`debate`).
+- **Read-only by default** - every agent runs sandboxed; pass `--yolo` only when you mean it.
+- **Built for agents to call agents** - JSONL output, TTY-aware formatting, a ready-made skill for Claude Code.
+- **Zero config** - detects installed CLIs, needs no model or API key of its own.
+- **One runtime dependency** (`typer`), pure Python 3.12+, ~1.7k lines of source, ~2.1k lines of tests.
+- **Persistent defaults** at `~/.moa/config.toml`, editable via `moa config`.
+- **Honest about its limits** - states caveats (like `agy`'s partial sandbox, or debate's failure modes) on stderr instead of hiding them.
+
+## How it works
+
+**`moa ask`** runs a parallel council. Each answer streams back, attributed, the instant it lands:
+
+```
+          ┌──► claude ──► "SQLite is almost always the right call..."
+ prompt ──┼──► codex  ──► "Use SQLite unless you need concurrent writers..."
+          └──► agy    ──► "For a single-user desktop app, SQLite wins..."
+```
+
+**`moa distill`** runs the same council, then one strong aggregator merges the answers into a single response (brand labels hidden, order shuffled):
+
+```
+          ┌──► claude ─┐
+ prompt ──┼──► codex  ─┼──► synthesizer ──► one unified answer
+          └──► agy    ─┘
+```
+
+**`moa debate`** runs a sequential adversarial exchange: two debaters critique each other across rounds while a moderator checks for convergence and writes the final verdict (transcript anonymized + shuffled to kill brand bias):
+
+```
+   round 1:  A answers cold
+             B critiques A, then answers
+   round 2:  each sees the other's latest, responds again
+             moderator: DONE or CONTINUE?
+   verdict:  moderator reads the shuffled transcript, writes the final answer
+```
+
+## Example
 
 ```text
 $ moa ask "Is Postgres or SQLite better for a desktop app?"
@@ -46,23 +92,45 @@ Asking claude, codex, agy (timeout 900s, read-only)
 For a single-user desktop app, SQLite is almost always the right call:
 zero-config, serverless, the whole DB is one file you can ship... [trimmed]
 
-─────────────── codex (gpt-5.5) · OK · 4.1s ───────────────
+──────────────── codex (gpt-5.5) · OK · 4.1s ──────────────
 
 Use SQLite unless you expect concurrent writers or need network access.
 For a desktop app neither is likely, so SQLite wins on simplicity... [trimmed]
 ```
 
-The selection note goes to stderr; the attributed answers go to stdout. In a terminal
-each answer gets the rule shown above; when piped or read by another agent, the same
-blocks render as plain `## ...` headings. Add `--json` for machine-readable JSONL.
+The selection note goes to **stderr**; the attributed answers go to **stdout**. In a terminal each answer gets the box-drawing rule shown above; when piped or read by another agent, the same blocks render as plain `## ...` headings. Add `--json` for machine-readable JSONL.
+
+## Why
+
+A single model gives you one perspective. Asking three frontier models the same question, and seeing where they agree, diverge, or contradict, is a fast, cheap way to pressure-test an answer. MOA makes that a one-liner using the CLIs you already pay for, with no API keys of its own.
+
+The synthesis prompt is adapted from the Mixture-of-Agents "Aggregate-and-Synthesize" prompt ([Wang et al. 2024](https://arxiv.org/abs/2406.04692)): the aggregator is told to critically evaluate its inputs (some may be biased or incorrect) and offer a refined, accurate, comprehensive reply rather than just replicating them.
+
+It's also a drop-in, batteries-included replacement for hand-rolling parallel `claude -p` / `codex exec` / `opencode run` calls, or for a hand-rolled "peer review" agent skill: one command, clean attributed output, made to be called by a human **or** by another agent.
+
+> The package is named `moa-cli` but installs the command `moa`.
+
+## Quick start
+
+> **Requirements.** MOA drives agent CLIs you install separately, it ships no model
+> or API key of its own. You need at least two of `claude` (Claude Code), `codex`,
+> `agy` (Antigravity), and `opencode` on your `PATH` and logged in. Run **`moa doctor`**
+> first to see which ones MOA can find; with only one installed, the "council" collapses
+> to a single answer.
+
+```bash
+uv tool install moa-cli        # installs the `moa` command
+moa doctor                     # show installed CLIs and their default models
+moa ask "Your question here"   # ask the top 3 installed agents (read-only)
+```
 
 ## Usage
 
-MOA has three prompt verbs that share the same selection/output options:
+MOA has three prompt verbs that share the same selection and output options:
 
 - **`moa ask PROMPT`** - council / peer review: N agents answer the same prompt in parallel; every answer is returned with attribution, streamed as it lands.
 - **`moa distill PROMPT`** - synthesis: run the council, then one strong aggregator merges the answers into a single unified response.
-- **`moa debate PROMPT`** - sequential debate: two debaters answer and adversarially critique each other across rounds, with a moderator that checks for convergence between rounds and writes the final verdict. The costliest mode; read the caveats below before reaching for it.
+- **`moa debate PROMPT`** - sequential debate: two debaters answer and adversarially critique each other across rounds, with a moderator that checks for convergence between rounds and writes the final verdict. The costliest mode; read the caveats before reaching for it.
 
 ```bash
 moa doctor                                  # show installed CLIs and their default models
@@ -85,10 +153,7 @@ The shared options (`-n/--num`, `-p/--provider`, `-x/--exclude`, `-m/--model`, `
 
 ### Read-only by default
 
-MOA is built to be called autonomously, so by default **no agent can write files or
-run mutating commands**. Each agent runs in its tool's safest mode: it may read local
-files (and, where the tool allows, research online), but it cannot edit anything. This
-is enforced by spawning each CLI with its own read-only flags:
+MOA is built to be called autonomously, so by default **no agent can write files or run mutating commands**. Each agent runs in its tool's safest mode: it may read local files (and, where the tool allows, research online), but it cannot edit anything. This is enforced by spawning each CLI with its own read-only flags:
 
 | Provider   | Read-only (default)        | Reads files | Web research              |
 | ---------- | -------------------------- | ----------- | ------------------------- |
@@ -97,32 +162,19 @@ is enforced by spawning each CLI with its own read-only flags:
 | `opencode` | `--agent plan`             | yes         | yes                       |
 | `agy`      | `--sandbox` (partial: shell only - can still edit files) | yes | yes |
 
-`claude`'s `--permission-mode default` is read-only in moa's non-interactive use: it reads
-files and researches online with the full toolset, but any write or edit needs an interactive
-approval that never comes under `-p`, so all mutations are denied. (`plan` mode is **not**
-usable headless - it emits a plan and waits for approval instead of answering.)
+`claude`'s `--permission-mode default` is read-only in moa's non-interactive use: it reads files and researches online with the full toolset, but any write or edit needs an interactive approval that never comes under `-p`, so all mutations are denied. (`plan` mode is **not** usable headless - it emits a plan and waits for approval instead of answering.)
 
-`codex`'s read-only mode is a kernel sandbox that also blocks network, so codex does no
-web research in the default mode (it still reads local files). `agy` has **no true
-read-only mode**: its `--sandbox` flag restricts agy's terminal/shell but does **not** stop
-its `write_file` tool, so agy **can still edit files** even in the default mode. This is
-**partial** protection (it closes the shell vector only), not read-only. moa applies
-`--sandbox` as the next-best safeguard and the selection note on stderr states honestly that
-`agy` is shell-sandboxed but can still edit files.
+`codex`'s read-only mode is a kernel sandbox that also blocks network, so codex does no web research in the default mode (it still reads local files). `agy` has **no true read-only mode**: its `--sandbox` flag restricts agy's terminal/shell but does **not** stop its `write_file` tool, so agy **can still edit files** even in the default mode. This is **partial** protection (it closes the shell vector only), not read-only. moa applies `--sandbox` as the next-best safeguard and the selection note on stderr states honestly that `agy` is shell-sandboxed but can still edit files.
 
 ### `--yolo` (full write access)
 
-Pass `--yolo` to grant every agent full write access (file edits and shell commands,
-auto-approved). Use it only when you actually want the agents to change your working tree.
+Pass `--yolo` to grant every agent full write access (file edits and shell commands, auto-approved). Use it only when you actually want the agents to change your working tree.
 
 ```bash
 moa ask --yolo "Refactor this module and run the tests."
 ```
 
-Under `--yolo` every agent gets full write access. For `agy` this means dropping
-`--sandbox`, so `agy --yolo` runs with no shell restrictions at all. In the default mode,
-`agy` runs with `--sandbox` (partial protection: shell only - it can still edit files), and
-MOA states that honestly on stderr.
+Under `--yolo` every agent gets full write access. For `agy` this means dropping `--sandbox`, so `agy --yolo` runs with no shell restrictions at all. In the default mode, `agy` runs with `--sandbox` (partial protection: shell only - it can still edit files), and MOA states that honestly on stderr.
 
 ### How agents are selected
 
@@ -229,6 +281,8 @@ Values are **tool-specific and not validated** by MOA (only "non-empty if presen
 - **stderr** carries progress and selection notes (`Asking claude, codex ...`), so piping stdout stays clean.
 - `--json` emits one JSON object per line (JSONL): `ask` writes a `{"type": "response", ...}` record per agent as it completes; `distill` writes a single `{"type": "synthesis", ...}` record (only the merged answer); `debate` writes a `{"type": "debate_turn", "round": N, ...}` record per turn plus a final `{"type": "verdict", ...}` record. Ideal when another agent calls MOA and parses the result.
 
+## Modes in depth
+
 ### `moa distill` (synthesis)
 
 `distill` runs the same council fan-out as `ask`, then one more pass where a strong aggregator merges the collected answers into a single, unified answer. **It returns only that merged answer** - the individual proposer responses are intermediates and are not printed (each one's arrival is noted on stderr so the wait isn't silent). It needs at least two successful proposer answers; with fewer it skips the merge and says so on stderr. The aggregator is chosen with `-s/--synthesizer`:
@@ -255,36 +309,30 @@ The aggregator prompt is adapted from the Mixture-of-Agents "Aggregate-and-Synth
 
 **Safety.** Debaters and the moderator run in the same read-only (or `--yolo`) mode as the other verbs - there is no permission bypass. agy's partial-sandbox caveat (shell only; it can still edit files) applies here too.
 
-> **Caveat - use sparingly.** Debate is the costliest mode (roughly `debaters × rounds` calls, plus a moderator check per round and the verdict) **and the least reliably beneficial.** The research is mixed-to-negative: multi-agent debate can converge on a *wrong* answer through conformity, a confident-but-incorrect debater can win on persuasiveness over correctness, and more rounds can entrench an error rather than fix it. The moderator and the adversarial-stance prompt are there to fight these failure modes, but they do not eliminate them. For most questions, `ask` or `distill` is the better default; reach for `debate` when you specifically want to surface and stress-test disagreement. (See *Can LLM Agents Really Debate?* arXiv:2511.07784, *Talk Isn't Always Cheap* arXiv:2509.05396, and the conformity/position-bias work cited in the design notes.)
-
 ### Attribution policy
 
 The human (or agent) reading MOA's output **always gets correct attribution**: every response block shows the real provider name. There is no human-facing anonymization toggle.
 
 The `distill` aggregator is a different story. To stop it picking favourites by brand, it **always** receives the proposer answers anonymized as "Response A / B / C" and order-shuffled (no toggle). The merged answer itself is brand-agnostic prose, and the A/B/C labels never leak into stdout, stderr, or the JSON.
 
-## Supported agents
+## Honesty & caveats
 
-Invocations below show the default (read-only) flags; `--yolo` swaps in each tool's full-access mode.
+MOA is designed to be honest about where it can and can't help. Two things worth keeping in mind:
 
-| Provider    | CLI        | Invocation (read-only default)                                      |
-| ----------- | ---------- | ------------------------------------------------------------------- |
-| `claude`    | `claude`   | `claude --model opus --permission-mode default -p PROMPT`           |
-| `codex`     | `codex`    | `codex exec -m gpt-5.5 --skip-git-repo-check -s read-only PROMPT`   |
-| `agy`       | `agy`      | `agy --sandbox --model "Gemini 3.1 Pro (High)" -p PROMPT` (partial: shell only - can still edit files) |
-| `opencode`  | `opencode` | `opencode run --agent plan PROMPT`                                  |
+- **`agy`'s read-only is partial.** `agy` has no true read-only mode. Its `--sandbox` restricts the shell but does not block its `write_file` tool, so agy can still edit files even in the default mode. MOA applies `--sandbox` as the next-best safeguard and says so plainly on stderr rather than implying full sandboxing.
+- **Use `debate` sparingly.** It is the costliest mode (roughly `debaters × rounds` calls, plus a moderator check per round and the verdict) **and the least reliably beneficial.** The research is mixed-to-negative: multi-agent debate can converge on a *wrong* answer through conformity, a confident-but-incorrect debater can win on persuasiveness over correctness, and more rounds can entrench an error rather than fix it. The moderator and the adversarial-stance prompt are there to fight these failure modes, but they do not eliminate them. For most questions, `ask` or `distill` is the better default; reach for `debate` when you specifically want to surface and stress-test disagreement. (See *Can LLM Agents Really Debate?* arXiv:2511.07784, *Talk Isn't Always Cheap* arXiv:2509.05396, and the conformity/position-bias work cited in the design notes.)
 
-Adding a new agent is a single entry in the `PROVIDERS` table in
-`src/moa_cli/providers.py` (executable, default model, command builder,
-permission flags); it then participates in detection, `-n` selection, and
-`distill` automatically.
+## Use MOA from an agent
 
-## Agent skill
+If you drive MOA from an agent (e.g. Claude Code), there's a ready-made skill at [`skills/moa/SKILL.md`](skills/moa/SKILL.md): it tells an agent when to reach for MOA and how to use it (verb choice, self-exclusion via `-x <self>`, parsing the JSONL output). It supersedes hand-rolling a "peer review" skill.
 
-If you drive MOA from an agent (e.g. Claude Code), there's a ready-made skill at
-[`skills/moa/SKILL.md`](skills/moa/SKILL.md): it tells an agent when to reach for MOA and
-how to use it (verb choice, self-exclusion via `-x <self>`, parsing the JSONL output). It
-supersedes hand-rolling a "peer review" skill.
+## Contributing
+
+Contributions are welcome. MOA uses a subagent-driven backlog workflow: each feature lives as a self-contained spec in [`backlog/`](backlog/!README.md), and a builder subagent implements it end to end (code + tests) before a separate fresh-eyes reviewer signs off. The backlog README documents the full loop, so any agent (or contributor) can pick up a `ready` ticket cold.
+
+- Grab a `ready` ticket from [`backlog/`](backlog/) and open a PR.
+- Keep new providers to one entry in the `PROVIDERS` table (`src/moa_cli/providers.py`).
+- Match the existing style: pure functions in `workflows.py`, no new runtime deps without a strong reason.
 
 ## Development
 
@@ -294,4 +342,8 @@ uv run pytest
 uv run ruff check src tests
 ```
 
-MIT licensed.
+CI runs `ruff` + `pytest` on Python 3.12 and 3.13. Releases are tag-driven: bump the version in `pyproject.toml` and `src/moa_cli/__init__.py`, tag `vX.Y.Z`, push, and the Release workflow publishes to PyPI and cuts a GitHub Release. See [`RELEASING.md`](RELEASING.md).
+
+## License
+
+MIT.
