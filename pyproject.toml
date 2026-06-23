@@ -1,6 +1,6 @@
 [project]
 name = "moa-cli"
-version = "0.3.4"
+version = "0.3.5"
 description = "Ask one question to multiple local AI coding CLIs in parallel and collect their answers."
 readme = "README.md"
 authors = [
@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 moa = "moa_cli.cli:main"
+moa-cli = "moa_cli.cli:main"  # lets `uvx moa-cli ...` work without --from
 
 [build-system]
 requires = ["uv_build>=0.10.0,<0.11.0"]

@@ -28,7 +28,7 @@ It has three verbs that share the same flags:
 Run this once on a machine; skip it if `moa doctor` already lists two or more agents.
 
 1. **Install moa:** `uv tool install moa-cli` (installs the `moa` command). Or run it
-   without installing: `uvx --from moa-cli moa ask "..."`.
+   without installing: `uvx moa-cli ask "..."`.
 2. **Check the panel:** `moa doctor` prints which agent CLIs are installed and their
    default models.
 3. **Need at least two peers.** moa drives whichever of these are installed AND

@@ -35,4 +35,4 @@ as it is still available.
    git push origin v0.1.0
    ```
 4. The Release workflow builds, publishes to PyPI, and creates the GitHub Release.
-   Once it lands, `uvx --from moa-cli moa ask "..."` works for anyone.
+   Once it lands, `uvx moa-cli ask "..."` works for anyone.

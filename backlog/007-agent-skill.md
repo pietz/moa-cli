@@ -17,7 +17,7 @@ first-time user through setup.
 - **Self-contained:** a single skill directory (SKILL.md + optional notes), no
   dependencies beyond `moa` itself. Installable/listable from skills.sh.
 - **Initial-setup walkthrough** (the skill guides this on first use):
-  1. Install moa: `uv tool install moa-cli` (or run via `uvx --from moa-cli moa ...`).
+  1. Install moa: `uv tool install moa-cli` (or run via `uvx moa-cli ...`).
   2. Run `moa doctor` to see which agent CLIs are installed.
   3. Ensure at least 2 peer CLIs are installed AND authed (claude / codex / agy /
      opencode); link each tool's install + login.

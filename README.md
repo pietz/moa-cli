@@ -23,8 +23,10 @@ moa ask "Is Postgres or SQLite better for a desktop app?"
 Or run it once without installing:
 
 ```bash
-uvx --from moa-cli moa ask "Review this plan."
+uvx moa-cli ask "Review this plan."
 ```
+
+> **Note:** `uvx moa ...` (without the `-cli`) installs an unrelated, long-abandoned bioinformatics package that owns the `moa` name on PyPI. Always use `uvx moa-cli ...`, or install with `uv tool install moa-cli` to get the plain `moa` command.
 
 ## Supported agents
 
