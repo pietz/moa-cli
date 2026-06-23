@@ -1,7 +1,7 @@
 # 007 - Agent skill for skills.sh
 
 **Status:** proposed
-**Depends on:** 004 (so the skill can use the `ask`/`fuse`/`debate` verbs). Can ship
+**Depends on:** 004 (so the skill can use the `ask`/`distill`/`debate` verbs). Can ship
 a first version against `moa ask` today and extend once 004 lands.
 
 ## Goal
@@ -26,7 +26,7 @@ first-time user through setup.
 - **Usage guidance for the agent:**
   - Default second opinion: `moa ask --json -x <self> "<fully self-contained prompt>"`,
     then parse the JSONL records.
-  - Merged answer: `moa fuse ...`; structured disagreement: `moa debate ...` (post-004).
+  - Merged answer: `moa distill ...`; structured disagreement: `moa debate ...`.
   - Re-brief fully each call (the CLIs are stateless); report which models responded
     / failed before synthesizing - mirrors the old peer-review skill.
 - **skills.sh metadata:** name + one-line description tuned for discovery/triggering
@@ -37,7 +37,7 @@ first-time user through setup.
 - [ ] Self-contained skill dir with a SKILL.md that triggers on "second opinion /
       peer review / ask multiple models" intents.
 - [ ] Setup section that takes a user from zero to a working `moa doctor`.
-- [ ] Usage examples for `ask` (and `fuse`/`debate` once 004 lands), using `--json`
+- [ ] Usage examples for `ask`, `distill`, and `debate`, using `--json`
       and `-x` for self-exclusion.
 - [ ] Submitted/listed on skills.sh (follow their submission format).
 - [ ] Supersedes the hand-rolled `peer-review` skill (note the migration).

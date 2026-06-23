@@ -1,7 +1,11 @@
 # 010 - Live connection check for agents
 
 **Status:** proposed
-**Touches:** `src/moa_cli/cli.py` (extend `doctor`, or add a verb), `tests/test_moa.py`, `README.md`
+**Touches:** command orchestration in `src/moa_cli/cli.py`, provider selection in
+`src/moa_cli/providers.py`, subprocess execution in `src/moa_cli/execution.py`,
+configuration in `src/moa_cli/config.py`, the matching split tests
+(`tests/test_cli.py`, `tests/test_providers.py`, `tests/test_config.py`), and
+`README.md`
 **Related:** 001 (provider roster / `doctor`), 005 (model mapping), 008 (persistent config).
 
 ## Goal

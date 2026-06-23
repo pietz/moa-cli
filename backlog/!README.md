@@ -57,7 +57,8 @@ Each builder returns one block, no prose:
 - `proposed` - under discussion, may still change
 - `ready` - decided, safe to hand to a builder
 - `building` - a subagent is implementing it
-- `done` - merged into `cli.py` + tests + README, then archived
+- `done` - implemented in the responsible `src/moa_cli/` modules, covered in the
+  matching split test files, documented in README, then archived
 - `parked` - deferred, not currently planned
 
 ## Archiving

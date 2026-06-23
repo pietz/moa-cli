@@ -269,12 +269,15 @@ Invocations below show the default (read-only) flags; `--yolo` swaps in each too
 
 | Provider    | CLI        | Invocation (read-only default)                                      |
 | ----------- | ---------- | ------------------------------------------------------------------- |
-| `claude`    | `claude`   | `claude --model opus --permission-mode plan -p PROMPT`              |
+| `claude`    | `claude`   | `claude --model opus --permission-mode default -p PROMPT`           |
 | `codex`     | `codex`    | `codex exec -m gpt-5.5 --skip-git-repo-check -s read-only PROMPT`   |
 | `agy`       | `agy`      | `agy --sandbox --model "Gemini 3.1 Pro (High)" -p PROMPT` (partial: shell only - can still edit files) |
 | `opencode`  | `opencode` | `opencode run --agent plan PROMPT`                                  |
 
-Adding a new agent is a single entry in the `PROVIDERS` table in `src/moa_cli/cli.py` (executable, default model, command builder, permission flags); it then participates in detection, `-n` selection, and `distill` automatically.
+Adding a new agent is a single entry in the `PROVIDERS` table in
+`src/moa_cli/providers.py` (executable, default model, command builder,
+permission flags); it then participates in detection, `-n` selection, and
+`distill` automatically.
 
 ## Agent skill
 

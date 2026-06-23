@@ -1,7 +1,10 @@
 # 012 - Capture per-run telemetry to ~/.moa
 
 **Status:** proposed
-**Touches:** `src/moa_cli/cli.py` (write a record after each run), `tests/test_moa.py`,
+**Touches:** command orchestration in `src/moa_cli/cli.py`, configuration/storage
+location in `src/moa_cli/config.py`, result records in `src/moa_cli/output.py` (or
+a focused telemetry module if warranted), the matching split tests
+(`tests/test_cli.py`, `tests/test_config.py`, `tests/test_output.py`), and
 `README.md`. A read-back command (`moa history`/`moa stats`) is a separate later item.
 **Related:** 005 (model mapping), 008 (config dir), 011 (effort), and the existing
 `--json` record shape (`result_record`).

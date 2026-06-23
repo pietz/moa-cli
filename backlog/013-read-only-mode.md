@@ -1,8 +1,9 @@
 # 013 - Strict read-only mode (`--read-only`)
 
 **Status:** proposed
-**Touches:** `src/moa_cli/cli.py` (a third permission tier + a `--read-only`/`-r`
-flag on the prompt verbs), `tests/test_moa.py`, `README.md`, `docs/cli-permission-modes.md`.
+**Touches:** permission tiers in `src/moa_cli/providers.py`, prompt-verb
+orchestration in `src/moa_cli/cli.py`, `tests/test_providers.py`,
+`tests/test_cli.py`, `README.md`, and `docs/cli-permission-modes.md`.
 **Related:** 009 (the original read-only + --yolo design, now being relaxed),
 `docs/cli-permission-modes.md` (per-tool flag matrix).
 
