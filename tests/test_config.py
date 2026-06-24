@@ -18,6 +18,23 @@ def _fake_stream(*results: RunResult):
     return generate
 
 
+def _capturing_stream(captured: dict, *results: RunResult):
+    """Like _fake_stream, but records the resolved providers/timeout it receives.
+
+    stream() is called positionally as (providers, prompt, timeout, ...), so this
+    lets a test assert on what selection/precedence actually produced, now that the
+    old "Asking ... (timeout Ns)" stderr line is gone.
+    """
+
+    async def generate(*args, **kwargs):
+        captured["providers"] = [p.name for p in args[0]]
+        captured["timeout"] = args[2]
+        for result in results:
+            yield result
+
+    return generate
+
+
 def _install_all(monkeypatch) -> None:
     monkeypatch.setattr(providers.shutil, "which", lambda executable: executable)
 
@@ -379,14 +396,15 @@ def test_config_default_used_when_flag_omitted(monkeypatch, tmp_path) -> None:
     _install_all(monkeypatch)
     _config_env(monkeypatch, tmp_path)
     (tmp_path / "config.toml").write_text("num = 2\n", encoding="utf-8")
+    captured: dict = {}
     monkeypatch.setattr(
-        cli, "stream", _fake_stream(_ok("claude", "A"), _ok("codex", "B"))
+        cli, "stream", _capturing_stream(captured, _ok("claude", "A"), _ok("codex", "B"))
     )
     runner = CliRunner()
     result = runner.invoke(cli.app, ["ask", "hi"])
     assert result.exit_code == 0
     # num=2 from config -> top 2 installed (claude, codex), not the built-in 3.
-    assert "Asking claude, codex (" in result.stderr
+    assert captured["providers"] == ["claude", "codex"]
 
 
 def test_flag_overrides_config(monkeypatch, tmp_path) -> None:
@@ -394,16 +412,19 @@ def test_flag_overrides_config(monkeypatch, tmp_path) -> None:
     _install_all(monkeypatch)
     _config_env(monkeypatch, tmp_path)
     (tmp_path / "config.toml").write_text("num = 2\n", encoding="utf-8")
+    captured: dict = {}
     monkeypatch.setattr(
         cli,
         "stream",
-        _fake_stream(_ok("claude", "A"), _ok("codex", "B"), _ok("agy", "C")),
+        _capturing_stream(
+            captured, _ok("claude", "A"), _ok("codex", "B"), _ok("agy", "C")
+        ),
     )
     runner = CliRunner()
     result = runner.invoke(cli.app, ["ask", "-n", "3", "hi"])
     assert result.exit_code == 0
     # -n 3 overrides config num=2.
-    assert "Asking claude, codex, agy (" in result.stderr
+    assert captured["providers"] == ["claude", "codex", "agy"]
 
 
 def test_config_exclude_default_applied(monkeypatch, tmp_path) -> None:
@@ -411,13 +432,13 @@ def test_config_exclude_default_applied(monkeypatch, tmp_path) -> None:
     _install_all(monkeypatch)
     _config_env(monkeypatch, tmp_path)
     (tmp_path / "config.toml").write_text('exclude = ["claude"]\n', encoding="utf-8")
-    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("codex", "A")))
+    captured: dict = {}
+    monkeypatch.setattr(cli, "stream", _capturing_stream(captured, _ok("codex", "A")))
     runner = CliRunner()
     result = runner.invoke(cli.app, ["ask", "-n", "1", "hi"])
     assert result.exit_code == 0
     # claude excluded by config -> top installed becomes codex.
-    assert "Asking codex (" in result.stderr
-    assert "excluded: claude" in result.stderr
+    assert captured["providers"] == ["codex"]
 
 
 def test_config_models_reach_run(monkeypatch, tmp_path) -> None:
@@ -520,13 +541,13 @@ def test_flag_equal_to_default_still_beats_config(monkeypatch, tmp_path) -> None
     _install_all(monkeypatch)
     _config_env(monkeypatch, tmp_path)
     (tmp_path / "config.toml").write_text("timeout = 120\n", encoding="utf-8")
-    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("claude", "A")))
+    captured: dict = {}
+    monkeypatch.setattr(cli, "stream", _capturing_stream(captured, _ok("claude", "A")))
     runner = CliRunner()
     result = runner.invoke(cli.app, ["ask", "-n", "1", "--timeout", "900", "hi"])
     assert result.exit_code == 0
     # The explicit 900 wins; config's 120 must not leak into the run.
-    assert "timeout 900s" in result.stderr
-    assert "timeout 120s" not in result.stderr
+    assert captured["timeout"] == 900.0
 
 
 def test_malformed_config_fails_cleanly_but_path_survives(

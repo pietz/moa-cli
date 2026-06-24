@@ -123,7 +123,7 @@ PROVIDERS: dict[str, Provider] = {
     "agy": Provider(
         "agy",
         "agy",
-        "Gemini 3.1 Pro (High)",
+        "Gemini 3.5 Flash (High)",
         _agy,
         readonly=("--sandbox",),
         readonly_note=(

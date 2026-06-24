@@ -494,7 +494,11 @@ def test_debate_defaults_to_two_agents(monkeypatch) -> None:
     runner = CliRunner()
     result = runner.invoke(cli.app, ["debate", "-r", "1", "hi"])
     assert result.exit_code == 0
-    assert "Asking claude, codex (" in result.stderr  # top 2 only, not agy/opencode
+    # Top 2 only (claude, codex) debate; agy/opencode are not selected.
+    assert "round 1 · claude" in result.stdout
+    assert "round 1 · codex" in result.stdout
+    assert "· agy" not in result.stdout
+    assert "· opencode" not in result.stdout
 
 
 def test_debate_runs_rounds_then_verdict(monkeypatch) -> None:

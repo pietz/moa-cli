@@ -92,9 +92,14 @@ def test_render_block_failure_detail() -> None:
 
 
 def test_render_block_blank_line_separation() -> None:
-    # Terminal: two leading blank lines + rule. Piped: one blank line + heading.
-    assert render_block(_ok("claude", "hi"), plain=False).startswith("\n\n─")
-    assert render_block(_ok("claude", "hi"), plain=True).startswith("\n## ")
+    # One leading blank line before the header, body immediately after (no gap).
+    terminal = render_block(_ok("claude", "hi"), plain=False)
+    assert terminal.startswith("\n─")
+    assert not terminal.startswith("\n\n")
+    assert "\n─" in terminal and "─\nhi" in terminal  # body right under the rule
+    piped = render_block(_ok("claude", "hi"), plain=True)
+    assert piped.startswith("\n## ")
+    assert piped.startswith("\n## claude (m) · OK · 1.0s\nhi")  # no blank after heading
 
 
 def test_render_synthesis_block_no_mode_tag() -> None:
@@ -128,5 +133,5 @@ def test_doctor_shows_default_models(monkeypatch) -> None:
     assert "codex (gpt-5.5)" in result.stdout
     assert "opencode (configured default)" in result.stdout
     # agy shows its model and the partial-sandbox marker (shell only; still edits).
-    assert "agy (Gemini 3.1 Pro (High))" in result.stdout
+    assert "agy (Gemini 3.5 Flash (High))" in result.stdout
     assert "partial sandbox - shell only; can still edit files" in result.stdout

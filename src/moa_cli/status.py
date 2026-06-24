@@ -14,8 +14,8 @@ import sys
 import time
 
 _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-_CLEAR_TO_END = "\033[K"
-_SEPAR = "   "
+_CHECK = "✓"
+_CLEAR_BELOW = "\033[J"  # clear from the cursor to the end of the screen
 
 
 def format_elapsed(seconds: float) -> str:
@@ -33,15 +33,29 @@ class StatusLine:
         self._stream = stream if stream is not None else sys.stderr
         self.active = self._stream.isatty()
         self._interval = interval
-        self._jobs: dict[str, tuple[str, float]] = {}
+        # key -> (label, started, finished_at | None). A finished job stays on
+        # screen with a ✓ and its frozen elapsed until it is removed/cleared.
+        self._jobs: dict[str, tuple[str, float, float | None]] = {}
         self._task: asyncio.Task | None = None
         self._frame = 0
         self._shown = False
+        self._prev_lines = 0
 
     def add(self, key: str, label: str) -> None:
         if not self.active:
             return
-        self._jobs[key] = (label, time.monotonic())
+        self._jobs[key] = (label, time.monotonic(), None)
+        self._draw()
+
+    def complete(self, key: str) -> None:
+        """Mark a job done: it keeps its place with a ✓ and frozen elapsed."""
+        if not self.active:
+            return
+        job = self._jobs.get(key)
+        if job is None:
+            return
+        label, started, _ = job
+        self._jobs[key] = (label, started, time.monotonic())
         self._draw()
 
     def remove(self, key: str) -> None:
@@ -54,12 +68,22 @@ class StatusLine:
             self.clear()
 
     def clear(self) -> None:
-        """Wipe the status line; call before emitting a stdout block."""
+        """Wipe the status block; call before emitting a stdout block."""
         if not self.active or not self._shown:
             return
-        self._stream.write("\r" + _CLEAR_TO_END)
+        self._stream.write(self._reset_cursor())
         self._stream.flush()
         self._shown = False
+        self._prev_lines = 0
+
+    def _reset_cursor(self) -> str:
+        """Return to the start of the drawn block and clear it (or just "\\r")."""
+        seq = "\r"
+        if self._shown:
+            if self._prev_lines > 1:
+                seq += f"\033[{self._prev_lines - 1}A"
+            seq += _CLEAR_BELOW
+        return seq
 
     def start(self) -> None:
         """Begin the redraw ticker (must run inside a live event loop)."""
@@ -89,11 +113,17 @@ class StatusLine:
         if not self.active or not self._jobs:
             return
         now = time.monotonic()
-        parts: list[str] = []
-        for index, (label, started) in enumerate(self._jobs.values()):
-            frame = _FRAMES[(self._frame + index) % len(_FRAMES)]
-            parts.append(f"{frame} {label} {format_elapsed(now - started)}")
+        lines: list[str] = []
+        for index, (label, started, finished_at) in enumerate(self._jobs.values()):
+            if finished_at is None:
+                marker = _FRAMES[(self._frame + index) % len(_FRAMES)]
+                elapsed = now - started
+            else:
+                marker = _CHECK
+                elapsed = finished_at - started
+            lines.append(f"{marker} {label} {format_elapsed(elapsed)}")
         self._frame += 1
-        self._stream.write("\r" + _SEPAR.join(parts) + _CLEAR_TO_END)
+        self._stream.write(self._reset_cursor() + "\n".join(lines))
         self._stream.flush()
+        self._prev_lines = len(lines)
         self._shown = True

@@ -333,20 +333,10 @@ def resolve_run(
         _note("No agents available. Run `moa doctor` to see which CLIs are installed.")
         raise typer.Exit(code=1)
 
-    mode = "yolo (full write access)" if yolo else "read-only"
-    selection_note = (
-        f"Asking {', '.join(item.name for item in selected)} "
-        f"(timeout {timeout:g}s, {mode})"
-    )
-    if skipped:
-        selection_note += f"; skipped (not installed): {', '.join(skipped)}"
-    if exclude_names:
-        selection_note += f"; excluded: {', '.join(exclude_names)}"
     if not yolo:
         for item in selected:
             if item.readonly_note:
-                selection_note += f"; note: {item.readonly_note}"
-    _note(selection_note)
+                _note(f"note: {item.readonly_note}")
 
     return RunConfig(
         prompt_text,
@@ -436,63 +426,72 @@ def distill(
         _read_config_or_empty(),
         "auto",
     )
-    results = asyncio.run(
-        _collect(
-            cfg.selected,
-            cfg.prompt,
-            cfg.timeout,
-            cfg.json_output,
-            cfg.models,
-            cfg.yolo,
-            emit_blocks=False,
-            efforts=cfg.efforts,
-        )
-    )
-    successes = [result for result in results if result.status == "ok"]
-    synthesis = _run_synthesis(cfg, results, successes, synthesizer)
+    synthesis = asyncio.run(_run_distill(cfg, synthesizer))
     if synthesis is None or synthesis.status != "ok":
         raise typer.Exit(code=1)
 
 
-def _run_synthesis(
-    cfg: RunConfig,
-    results: list[RunResult],
-    successes: list[RunResult],
-    synthesizer: str,
-) -> RunResult | None:
-    if len(successes) < 2:
-        _note("Distill skipped: need at least 2 successful responses.")
-        return None
-
+async def _run_distill(cfg: RunConfig, synthesizer: str) -> RunResult | None:
+    """Run the council, marking each proposer ✓ as it lands (answers stay hidden),
+    then show a spinner for the synthesis under the checkmarks and reveal the merge.
+    """
+    status = StatusLine()
+    for provider in cfg.selected:
+        model = cfg.models.get(provider.name) or provider.default_model
+        status.add(provider.name, _call_label("", provider.name, model))
+    status.start()
+    results: list[RunResult] = []
     try:
-        synth_name = choose_synthesizer(
-            synthesizer, [provider.name for provider in cfg.selected]
-        )
-    except ValueError as exc:
-        _note(f"Distill skipped: {exc}")
-        return None
+        async for result in stream(
+            cfg.selected, cfg.prompt, cfg.timeout, cfg.models or {}, cfg.yolo, cfg.efforts
+        ):
+            results.append(result)
+            if status.active:
+                status.complete(result.provider)  # ✓, stays on screen
+            else:
+                _note(
+                    f"  {result.provider} responded "
+                    f"({_status_label(result.status)}, {result.elapsed:.1f}s)"
+                )
 
-    synth_prompt, _label_map = build_synthesis_prompt(cfg.prompt, results, blind=True)
-    synth_model = cfg.models.get(synth_name) or PROVIDERS[synth_name].default_model
-    _progress_note(f"Distilling with {synth_name}...")
-    synth_result = asyncio.run(
-        _run_with_status(
+        successes = [result for result in results if result.status == "ok"]
+        if len(successes) < 2:
+            status.clear()
+            _note("Distill skipped: need at least 2 successful responses.")
+            return None
+        try:
+            synth_name = choose_synthesizer(
+                synthesizer, [provider.name for provider in cfg.selected]
+            )
+        except ValueError as exc:
+            status.clear()
+            _note(f"Distill skipped: {exc}")
+            return None
+
+        synth_prompt, _label_map = build_synthesis_prompt(
+            cfg.prompt, results, blind=True
+        )
+        synth_model = cfg.models.get(synth_name) or PROVIDERS[synth_name].default_model
+        _progress_note(f"Distilling with {synth_name}...")
+        status.add("synthesis", _call_label("synthesis", synth_name, synth_model))
+        synth_result = await run_provider(
             PROVIDERS[synth_name],
             synth_prompt,
             cfg.timeout,
             cfg.models.get(synth_name),
             cfg.yolo,
             cfg.efforts.get(synth_name),
-            _call_label("synthesis", synth_name, synth_model),
         )
-    )
-    output = (
-        json.dumps(synthesis_record(synth_result, synth_name))
-        if cfg.json_output
-        else render_synthesis_block(synth_result, synth_name)
-    )
-    _emit(output)
-    return synth_result
+        status.clear()
+        output = (
+            json.dumps(synthesis_record(synth_result, synth_name))
+            if cfg.json_output
+            else render_synthesis_block(synth_result, synth_name)
+        )
+        _emit(output)
+        return synth_result
+    finally:
+        await status.stop()
 
 
 RoundsOpt = Annotated[

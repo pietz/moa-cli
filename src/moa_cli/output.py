@@ -43,8 +43,8 @@ def _plain_output() -> bool:
 
 def _render(label: str, result: RunResult, plain: bool) -> str:
     if plain:
-        return "\n".join(["", f"## {label}", "", *_body(result)])
-    return "\n".join(["", "", _rule(label), "", *_body(result)])
+        return "\n".join(["", f"## {label}", *_body(result)])
+    return "\n".join(["", _rule(label), *_body(result)])
 
 
 def render_block(result: RunResult, plain: bool | None = None) -> str:

@@ -81,7 +81,7 @@ def test_add_draws_label_with_spinner_and_elapsed() -> None:
     assert "s" in rendered  # elapsed suffix
 
 
-def test_two_jobs_render_side_by_side() -> None:
+def test_two_jobs_render_on_separate_lines() -> None:
     stream = _FakeTTY()
     status = StatusLine(stream=stream)
     status.add("claude", "claude (opus)")
@@ -89,6 +89,14 @@ def test_two_jobs_render_side_by_side() -> None:
     rendered = "".join(stream.written)
     assert "claude (opus)" in rendered
     assert "codex (gpt-5.5)" in rendered
+    # The two jobs are stacked vertically, not joined on one line.
+    last_draw = stream.written[-1]
+    assert "claude (opus)" in last_draw and "codex (gpt-5.5)" in last_draw
+    assert "\n" in last_draw
+    # A subsequent redraw of the 2-line block walks the cursor back up one line.
+    stream.written.clear()
+    status._draw()
+    assert "\033[1A" in stream.written[-1]
 
 
 def test_clear_wipes_a_drawn_line_and_is_idempotent() -> None:
@@ -97,7 +105,7 @@ def test_clear_wipes_a_drawn_line_and_is_idempotent() -> None:
     status.add("claude", "claude (opus)")
     assert status._shown is True
     status.clear()
-    assert "".join(stream.written).endswith("\r\033[K")
+    assert "".join(stream.written).endswith("\r\033[J")
     assert status._shown is False
     before = len(stream.written)
     status.clear()  # nothing shown now -> no-op
@@ -117,8 +125,8 @@ def test_remove_last_job_clears_others_redraw() -> None:
     assert "claude" not in rendered
 
     stream.written.clear()
-    status.remove("codex")  # none remain -> clear the line
-    assert "".join(stream.written) == "\r\033[K"
+    status.remove("codex")  # none remain -> clear the block
+    assert "".join(stream.written) == "\r\033[J"
 
 
 # --- ticker lifecycle -------------------------------------------------------
