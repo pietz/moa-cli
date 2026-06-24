@@ -37,7 +37,7 @@ uv tool install moa-cli
 
 ### `ask` - a council
 
-N agents answer in parallel, each attributed as it lands. The default, and the right call most of the time (shown above).
+**Peer review for every prompt.** N agents answer in parallel, each attributed as it lands - the default, and the right call most of the time.
 
 ```bash
 moa ask "Name one underrated CLI tool every dev should know. One sentence."
@@ -45,7 +45,7 @@ moa ask "Name one underrated CLI tool every dev should know. One sentence."
 
 ### `distill` - one merged answer
 
-The council answers, then a strong aggregator synthesizes them into a single response.
+**Many models, one answer.** The council answers, then a strong aggregator synthesizes them into a single response.
 
 ```bash
 moa distill "What are the top 5 principles of good API design?"
@@ -55,7 +55,7 @@ moa distill "What are the top 5 principles of good API design?"
 
 ### `debate` - adversarial rounds
 
-Two agents argue across rounds; a moderator weighs the exchange and writes the verdict.
+**See the debate, trust the decision.** Two agents argue across rounds; a moderator weighs the exchange and writes the verdict.
 
 ```bash
 moa debate "Should we move our database from SQLite to Postgres now?"
@@ -71,7 +71,7 @@ moa auto-detects whichever of these are on your `PATH` and drives them in their 
 | --- | --- | --- | --- |
 | Claude Code | `claude` | `opus` | yes |
 | OpenAI Codex | `codex` | `gpt-5.5` | yes |
-| Google Antigravity | `agy` | `Gemini 3.1 Pro (High)` | partial |
+| Google Antigravity | `agy` | `Gemini 3.5 Flash (High)` | partial |
 | opencode | `opencode` | (authed default) | yes |
 
 Adding a new agent is a single entry in the `PROVIDERS` table in `src/moa_cli/providers.py`.
