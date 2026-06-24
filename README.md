@@ -1,14 +1,17 @@
-<p align="center">
-  <img src="assets/logo-full-white.png" alt="moa - mixture of agents" width="360">
-</p>
+<img src="assets/logo-full-white.png" alt="moa - mixture of agents" width="260" align="left">
+
+<strong>One prompt, fanned out to the local agent CLIs you have, answered in parallel.</strong><br>
+Each answer streams back attributed, as it lands.
+
+<a href="https://github.com/pietz/moa-cli/actions/workflows/ci.yml"><img src="https://github.com/pietz/moa-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+<a href="https://pypi.org/project/moa-cli/"><img src="https://img.shields.io/pypi/v/moa-cli.svg?label=pypi" alt="PyPI"></a>
+
+<br clear="left">
+
+---
 
 <p align="center">
-  <strong>One prompt, fanned out to the local agent CLIs you have, answered in parallel.<br>Each answer streams back attributed, as it lands.</strong>
-</p>
-
-<p align="center">
-  <a href="https://github.com/pietz/moa-cli/actions/workflows/ci.yml"><img src="https://github.com/pietz/moa-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://pypi.org/project/moa-cli/"><img src="https://img.shields.io/pypi/v/moa-cli.svg?label=pypi" alt="PyPI"></a>
+  <img src="demo/ask.gif" alt="moa ask - a council of local agents answering one prompt in parallel">
 </p>
 
 ---
@@ -27,19 +30,15 @@ Or install it for the plain `moa` command:
 uv tool install moa-cli
 ```
 
-> **Note:** `uvx moa ...` (without the `-cli`) installs an unrelated, long-abandoned bioinformatics package that owns the `moa` name on PyPI. Always use `uvx moa-cli ...`, or install with `uv tool install moa-cli` to get the plain `moa` command.
-
 ## Three modes
 
 ### `ask` - a council
 
-N agents answer in parallel, each attributed as it lands. The default, and the right call most of the time.
+N agents answer in parallel, each attributed as it lands. The default, and the right call most of the time (shown above).
 
 ```bash
 moa ask "Name one underrated CLI tool every dev should know. One sentence."
 ```
-
-![moa ask demo](demo/ask.gif)
 
 ### `distill` - one merged answer
 
@@ -274,6 +273,20 @@ moa has no API key and no telemetry of its own, but it is still spending real re
 
 If you drive moa from an agent (e.g. Claude Code), there's a ready-made skill at [`skills/moa/SKILL.md`](skills/moa/SKILL.md): it tells an agent when to reach for moa and how to use it (verb choice, self-exclusion via `-x <self>`, parsing the JSONL output). It supersedes hand-rolling a "peer review" skill.
 
+Install it with the [`skills`](https://github.com/vercel-labs/skills) CLI (works with Claude Code and 40+ other agents):
+
+```bash
+# install the moa skill for Claude Code, globally
+npx skills add pietz/moa-cli -a claude-code -g
+```
+
+```bash
+npx skills add pietz/moa-cli           # interactive: pick agent + scope
+npx skills add pietz/moa-cli --list    # see what's in the repo first
+```
+
+The skill still needs the `moa` CLI itself on your `PATH` (`uv tool install moa-cli`) plus at least two agent CLIs installed and authed - run `moa doctor` to check.
+
 ## Contributing
 
 Contributions are welcome. moa uses a subagent-driven backlog workflow: each feature lives as a self-contained spec in [`backlog/`](backlog/!README.md), and a builder subagent implements it end to end (code + tests) before a separate fresh-eyes reviewer signs off. The backlog README documents the full loop, so any agent (or contributor) can pick up a `ready` ticket cold.
@@ -290,7 +303,7 @@ uv run pytest
 uv run ruff check src tests
 ```
 
-CI runs `ruff` + `pytest` on Python 3.12 and 3.13. Releases are tag-driven: bump the version in `pyproject.toml` and `src/moa_cli/__init__.py`, tag `vX.Y.Z`, push, and the Release workflow publishes to PyPI and cuts a GitHub Release. See [`RELEASING.md`](RELEASING.md).
+CI runs `ruff` + `pytest` on Python 3.12 and 3.13. Releases are tag-driven: bump the version in `pyproject.toml` and `src/moa_cli/__init__.py`, tag `vX.Y.Z`, push, and the Release workflow publishes to PyPI and cuts a GitHub Release. See [`docs/releasing.md`](docs/releasing.md).
 
 ## License
 

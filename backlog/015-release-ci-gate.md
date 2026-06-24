@@ -2,7 +2,7 @@
 
 **Status:** ready
 **Touches:** `.github/workflows/release.yml`, optionally `.github/workflows/ci.yml`,
-`RELEASING.md`.
+`docs/releasing.md`.
 **Related:** none.
 
 ## Context
@@ -10,7 +10,7 @@
 `.github/workflows/release.yml:3-23` triggers on `push: tags: ["v*"]` and runs
 `uv build` + `pypa/gh-action-pypi-publish` + `gh release create` with **no `needs:`**
 and **no test step**. `.github/workflows/ci.yml:3-7` runs only on `push: branches:
-[main]` and `pull_request` - not on tags - so a tag push never re-runs CI. `RELEASING.md:24`
+[main]` and `pull_request` - not on tags - so a tag push never re-runs CI. `docs/releasing.md:24`
 acknowledges the gap as a manual checklist line ("Make sure `main` is green in CI")
 with no enforcement.
 
@@ -32,7 +32,7 @@ irreversible (yank-only), so a bad release cannot be undone.
   should diverge (e.g. different runners).
 - Add a tag-regex guard (`^v\d+\.\d+\.\d+$`) so a stray `v*` tag (e.g. a pre-release
   typo) does not trigger a publish unintentionally. Cheap insurance.
-- Update `RELEASING.md` to reflect that the gate is now enforced, not manual.
+- Update `docs/releasing.md` to reflect that the gate is now enforced, not manual.
 
 ## Acceptance criteria
 
@@ -40,7 +40,7 @@ irreversible (yank-only), so a bad release cannot be undone.
       publish step; a failing test aborts the release.
 - [ ] Dependencies are installed (`uv sync`) in the release job before tests run.
 - [ ] Tag trigger is gated by a `^v\d+\.\d+\.\d+$` (or agreed) regex.
-- [ ] `RELEASING.md` updated to state the gate is automated.
+- [ ] `docs/releasing.md` updated to state the gate is automated.
 - [ ] Manual verification: push a throwaway tag from a deliberately-failing test
       branch and confirm the release job fails before publishing (do this on a fork or
       a scratch tag, never on the real `v*` series).
