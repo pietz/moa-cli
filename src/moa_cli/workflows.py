@@ -28,28 +28,39 @@ ROUNDS_MAX = 4
 ADVERSARIAL_INSTRUCTION = """Before giving your own answer, critically examine the \
 other participant's answer above: identify any errors, weaknesses, unsupported claims, or \
 gaps in reasoning. Do NOT agree merely to reach consensus - only concede a point if it is \
-genuinely correct. Then give your own best, complete answer to the original question, \
-incorporating any valid corrections."""
+genuinely correct. Work toward closing the debate, not expanding it: resolve the points \
+already on the table rather than opening new ones, and do not introduce a fresh angle just \
+to have something to add. Once you and the other participant substantively agree on the core \
+answer, say so plainly instead of finding a new dimension to debate. Then give your own best, \
+complete answer to the original question, incorporating any valid corrections."""
 
 DEBATER_OPENING_INSTRUCTION = """This is the opening move of a debate: another \
 participant will critique your answer next, so take a clear, specific position on the \
 question and justify it. A vague, hedging, or one-word answer gives them nothing \
 meaningful to engage with. Give your best, complete answer."""
 
+DEBATER_STYLE = """Write conversationally, like one expert talking to another, in a few short \
+paragraphs at most. Do not use headings or section labels. Refer to the other participant as \
+"you", not by name."""
+
 MODERATOR_VERDICT_PROMPT = """You are the moderator of this debate. Below is a transcript of a \
 debate between AI coding assistants who answered the user's question and then critiqued each \
 other's answers across several rounds. The participants are anonymized and presented in \
 arbitrary order.
 
-Your task is to read the full debate and write the single best, final answer to the user's \
-question. Weigh correctness and the strength of evidence and reasoning ABOVE confidence, \
-fluency, and assertiveness - a wrong answer stated confidently must not win. Where the \
-participants disagree, decide on the merits; where they agree, verify the agreement is actually \
-sound rather than shared error.
+Your task is to read the full debate and write the final answer the user should walk away with. \
+Weigh correctness and the strength of evidence and reasoning ABOVE confidence, fluency, and \
+assertiveness - a wrong answer stated confidently must not win.
+- If the participants converged on a sound conclusion, state it clearly and confidently.
+- If a disagreement is genuinely decidable on the merits, decide it and explain why the winning \
+position is right.
+- If they settled into a real, unresolved disagreement, do not paper over it: state where they \
+agree, then lay out each position and the strongest reason behind it so the user can decide.
 
 Guidelines:
-- Do not pick a "winner" by name or refer to participants, rounds, or the debate. Just give the \
-best possible answer.
+- Lead with the answer, not a recap of who said what. Do not pick a "winner" by name or refer to \
+participants, rounds, or the debate.
+- Where the participants agree, verify the agreement is actually sound rather than shared error.
 - Keep what is correct and well-supported; discard what is wrong, unsupported, or merely \
 asserted.
 - Do not invent information that the debate does not support."""
@@ -174,14 +185,14 @@ def build_debate_turn_prompt(question: str, prior: list[tuple[str, str]]) -> str
     if not prior:
         return (
             f"## Question\n\n{question}\n\n"
-            f"## Instruction\n\n{DEBATER_OPENING_INSTRUCTION}\n\n"
+            f"## Instruction\n\n{DEBATER_OPENING_INSTRUCTION}\n\n{DEBATER_STYLE}\n\n"
             "## Your answer\n"
         )
     others = "\n\n".join(f"### {label}\n\n{text.strip()}" for label, text in prior)
     return (
         f"## Question\n\n{question}\n\n"
         f"## The other participant's latest answer\n\n{others}\n\n"
-        f"## Instruction\n\n{ADVERSARIAL_INSTRUCTION}\n\n"
+        f"## Instruction\n\n{ADVERSARIAL_INSTRUCTION}\n\n{DEBATER_STYLE}\n\n"
         "## Your answer\n"
     )
 
