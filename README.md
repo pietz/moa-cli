@@ -21,7 +21,7 @@
 
 Some problems deserve more than one agent.
 
-**moa** fans your prompt out to the local agent CLIs you have installed and runs them in parallel (the top 3 by default, tunable with `-n`), so you can see where independent models agree, differ, or are flat-out wrong. It uses the subscriptions you already pay for, no API key of its own.
+**moa** (short for *mixture of agents*) fans your prompt out to the local agent CLIs you have installed and runs them in parallel (the top 3 by default, tunable with `-n`), so you can see where independent models agree, differ, or are flat-out wrong. It uses the subscriptions you already pay for, no API key of its own.
 
 ```bash
 uvx moa-cli ask "Is Postgres or SQLite better for a desktop app?"
