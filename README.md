@@ -1,12 +1,15 @@
-<img src="assets/logo-full-white.png" alt="moa - mixture of agents" width="260" align="left">
+<p align="center">
+  <img src="assets/logo-full-white.png" alt="moa - mixture of agents" width="300">
+</p>
 
-<strong>One prompt, fanned out to the local agent CLIs you have, answered in parallel.</strong><br>
-Each answer streams back attributed, as it lands.
+<p align="center">
+  <strong>One prompt, fanned out to the local agent CLIs you have, answered in parallel.<br>Each answer streams back attributed, as it lands.</strong>
+</p>
 
-<a href="https://github.com/pietz/moa-cli/actions/workflows/ci.yml"><img src="https://github.com/pietz/moa-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-<a href="https://pypi.org/project/moa-cli/"><img src="https://img.shields.io/pypi/v/moa-cli.svg?label=pypi" alt="PyPI"></a>
-
-<br clear="left">
+<p align="center">
+  <a href="https://github.com/pietz/moa-cli/actions/workflows/ci.yml"><img src="https://github.com/pietz/moa-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/moa-cli/"><img src="https://img.shields.io/pypi/v/moa-cli.svg?label=pypi" alt="PyPI"></a>
+</p>
 
 ---
 
