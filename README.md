@@ -33,6 +33,12 @@ Or install it for the plain `moa` command:
 uv tool install moa-cli
 ```
 
+Or give a coding agent (like Claude Code) the moa [skill](#use-moa-from-an-agent), so it reaches for a second opinion on its own:
+
+```bash
+npx skills add pietz/moa-cli -a claude-code -g
+```
+
 ## Three modes
 
 ### `ask` - a council
