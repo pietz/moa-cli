@@ -33,10 +33,10 @@ Or install it for the plain `moa` command:
 uv tool install moa-cli
 ```
 
-Or give a coding agent (like Claude Code) the moa [skill](https://skills.sh/pietz/moa-cli), so it reaches for a second opinion on its own:
+Or give a coding agent (like Claude Code) the moa [skill](https://www.skills.sh/pietz/moa-cli/moa), so it reaches for a second opinion on its own:
 
 ```bash
-npx skills add pietz/moa-cli -g
+npx skills add https://github.com/pietz/moa-cli --skill moa
 ```
 
 ## Three modes
@@ -285,13 +285,11 @@ If you drive moa from an agent (e.g. Claude Code), there's a ready-made skill at
 Install it with the [`skills`](https://github.com/vercel-labs/skills) CLI (works with Claude Code and 40+ other agents):
 
 ```bash
-# install the moa skill for Claude Code, globally
-npx skills add pietz/moa-cli -a claude-code -g
-```
+# interactive: pick agent + scope
+npx skills add https://github.com/pietz/moa-cli --skill moa
 
-```bash
-npx skills add pietz/moa-cli           # interactive: pick agent + scope
-npx skills add pietz/moa-cli --list    # see what's in the repo first
+# or non-interactive, e.g. globally for Claude Code
+npx skills add https://github.com/pietz/moa-cli --skill moa -a claude-code -g
 ```
 
 The skill still needs the `moa` CLI itself on your `PATH` (`uv tool install moa-cli`) plus at least two agent CLIs installed and authed - run `moa doctor` to check.
