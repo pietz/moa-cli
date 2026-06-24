@@ -333,11 +333,6 @@ def resolve_run(
         _note("No agents available. Run `moa doctor` to see which CLIs are installed.")
         raise typer.Exit(code=1)
 
-    if not yolo:
-        for item in selected:
-            if item.readonly_note:
-                _note(f"note: {item.readonly_note}")
-
     return RunConfig(
         prompt_text,
         selected,

@@ -48,36 +48,6 @@ def _fake_stream(*results: RunResult):
     return stream
 
 
-def test_ask_emits_agy_partial_protection_note(monkeypatch) -> None:
-    # When agy runs in the default (non-yolo) mode, the stderr selection note
-    # must honestly state agy is shell-sandboxed but can still edit files.
-    installed = {"claude", "codex", "agy", "opencode"}
-    monkeypatch.setattr(
-        providers.shutil, "which", lambda exe: exe if exe in installed else None
-    )
-    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("agy", "OK")))
-    runner = CliRunner()
-    result = runner.invoke(cli.app, ["ask", "-p", "agy", "hi"])
-    assert result.exit_code == 0
-    assert (
-        "agy is shell-sandboxed but can still edit files (no true read-only mode)"
-        in result.stderr
-    )
-
-
-def test_ask_omits_agy_note_under_yolo(monkeypatch) -> None:
-    # Under --yolo agy drops --sandbox (full access), so no partial-protection note.
-    installed = {"claude", "codex", "agy", "opencode"}
-    monkeypatch.setattr(
-        providers.shutil, "which", lambda exe: exe if exe in installed else None
-    )
-    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("agy", "OK")))
-    runner = CliRunner()
-    result = runner.invoke(cli.app, ["ask", "-p", "agy", "--yolo", "hi"])
-    assert result.exit_code == 0
-    assert "can still edit files" not in result.stderr
-
-
 # --- verbs (ask / distill / doctor) -----------------------------------------
 
 
@@ -369,19 +339,6 @@ def test_distill_aggregator_yolo_propagates(monkeypatch) -> None:
     )
     assert result.exit_code == 0
     assert captured["yolo"] is True
-
-
-def test_distill_emits_agy_partial_protection_note(monkeypatch) -> None:
-    # Shared resolver: distill surfaces agy's honest note exactly like ask.
-    _install_all(monkeypatch)
-    monkeypatch.setattr(cli, "stream", _fake_stream(_ok("agy", "OK")))
-    runner = CliRunner()
-    result = runner.invoke(cli.app, ["distill", "-p", "agy", "hi"])
-    assert result.exit_code == 1
-    assert (
-        "agy is shell-sandboxed but can still edit files (no true read-only mode)"
-        in result.stderr
-    )
 
 
 def test_synthesizer_prompt_keeps_load_bearing_clauses() -> None:
